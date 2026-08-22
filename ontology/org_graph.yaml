@@ -1,0 +1,97 @@
+# Ontology registry for the synthetic org graph shipped with this repo.
+#
+# This is DATA, not code: pattern modules resolve types and semantics from this file (or an
+# equivalent table-backed source) at query time and never hardcode a type name.
+
+name: org_graph
+version: "1.0"
+
+entity_types:
+  - name: Goal
+    description: A top-level company objective, e.g. a yearly revenue or growth target.
+  - name: Initiative
+    description: A cross-team program of work that advances one or more goals.
+  - name: Project
+    description: A scoped body of work delivering a specific outcome within an initiative.
+  - name: Task
+    description: A unit of work within a project, assignable to a person.
+  - name: Person
+    description: An individual contributor, manager, or executive.
+  - name: Risk
+    description: An identified risk that may threaten a goal, initiative, project, or task.
+
+relationship_types:
+  - name: belongs_to
+    description: The source is a child of the target in the org hierarchy (Task -> Project -> Initiative -> Goal).
+    source_types: [Task, Project, Initiative]
+    target_types: [Project, Initiative, Goal]
+    inverse: null
+    traversal: transitive
+    canonical_direction: source_to_target
+    max_depth: 10
+
+  - name: blocks
+    description: The source cannot proceed, or is impeded, until the target is resolved.
+    source_types: [Task, Project]
+    target_types: [Task, Project]
+    inverse: depends_on
+    traversal: transitive
+    canonical_direction: source_to_target
+    max_depth: 5
+
+  - name: depends_on
+    description: The source cannot finish until the target does.
+    source_types: [Task, Project]
+    target_types: [Task, Project]
+    inverse: blocks
+    traversal: transitive
+    canonical_direction: source_to_target
+    max_depth: 5
+
+  - name: owns
+    description: The source person is the primary owner of the target.
+    source_types: [Person]
+    target_types: [Goal, Initiative, Project, Task]
+    inverse: null
+    traversal: terminal
+    canonical_direction: source_to_target
+    max_depth: 1
+
+  - name: accountable_for
+    description: The source person is ultimately accountable for the target's outcome, distinct from day-to-day ownership.
+    source_types: [Person]
+    target_types: [Goal, Initiative, Project, Task]
+    inverse: null
+    traversal: terminal
+    canonical_direction: source_to_target
+    max_depth: 1
+
+  - name: threatens
+    description: The source risk endangers the target's successful completion.
+    source_types: [Risk]
+    target_types: [Goal, Initiative, Project, Task]
+    inverse: null
+    traversal: terminal
+    canonical_direction: source_to_target
+    max_depth: 1
+
+semantics:
+  - name: upstream
+    relationship_types: [blocks, depends_on]
+  - name: hierarchy
+    relationship_types: [belongs_to]
+  - name: ownership
+    relationship_types: [owns, accountable_for]
+  - name: risk
+    relationship_types: [threatens]
+
+table_config:
+  node_table: canonical_entities
+  edge_table: entity_relationships
+  node_id_column: entity_id
+  node_name_column: name
+  node_type_column: type
+  node_status_column: status
+  edge_source_column: source_entity_id
+  edge_target_column: target_entity_id
+  edge_type_column: relationship_type
