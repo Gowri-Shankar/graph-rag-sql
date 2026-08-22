@@ -93,6 +93,58 @@ retriever.enrich_batch(["proj-atlas", "proj-nimbus", "goal-fy26-revenue"])
 # → {entity_id: EnrichmentResult(parents=[...], blockers=[...], risks=[...], owners=[...])}
 ```
 
+## Bring your own ontology
+
+The graph vocabulary is **data, not code**. A pydantic-validated registry declares your entity
+types, relationship types, their direction, which ones may recurse, per-type depth caps, and
+semantic aliases:
+
+```yaml
+# ontology/org_graph.yaml (excerpt)
+relationship_types:
+  - name: depends_on
+    description: The source cannot finish until the target does.
+    source_types: [Task, Project]
+    target_types: [Task, Project]
+    inverse: blocks
+    traversal: transitive          # may recurse; `terminal` types are enrichment-only
+    canonical_direction: target_to_source
+    max_depth: 5                   # per-type blast-radius cap
+
+semantics:
+  upstream:  [blocks, depends_on]  # callers ask for a MEANING, not a column value
+  hierarchy: [belongs_to]
+```
+
+Pattern modules never see a type name. The backend resolves a semantic to a concrete list and
+passes it as an array query parameter, so `patterns/` contains no domain literals and no table
+names — those come from the registry's `table_config` too.
+
+**Adapting to a different domain is two views and one YAML file — no Python changes.** Expose
+your own tables in the shape the registry declares:
+
+```sql
+CREATE VIEW graph_nodes AS
+  SELECT id AS node_id, subject AS name, 'Incident' AS node_type, state AS status FROM incidents
+  UNION ALL SELECT id, name, 'Service', status FROM services;
+
+CREATE VIEW graph_edges AS
+  SELECT cause_id AS src_id, effect_id AS dst_id, 'caused_by' AS edge_type FROM incident_links;
+```
+
+```python
+ontology  = FileOntologySource("my_domain.yaml").load()
+retriever = GraphRetriever(backend, ontology=ontology)
+retriever.traverse("svc-checkout", semantic="upstream", max_depth=2)
+```
+
+This is **verified, not asserted**: `tests/test_conformance.py` runs all three patterns against
+a second ontology (Service / Incident / Team) that shares no type names with the demo graph,
+with zero changes to any pattern module.
+
+The registry can also live in a **table** rather than a file, behind the same `OntologySource`
+Protocol — so adding a traversable relationship type is an `INSERT`, not a redeploy.
+
 ## Quickstart
 
 ### 2-minute demo — no cloud, no keys
@@ -126,7 +178,9 @@ flowchart LR
  GEN["generator.py<br/>seeded synthetic org graph"] --> CSV["data/*.csv<br/>(&lt; 1 MB, bundled)"]
  CSV -->|"demo.py (default)"| DUCK[("DuckDB<br/>in-memory")]
  CSV -->|"scripts/setup_bigquery.py"| BQ[("BigQuery<br/>sandbox / prod")]
- subgraph PATTERNS["patterns/ — dialect-rendered SQL"]
+ ONT["ontology/*.yaml or table<br/>OntologySource Protocol"] --> RET
+ DIA["dialects/<br/>SqlDialect Protocol"] -.-> PATTERNS
+ subgraph PATTERNS["patterns/ — written once, dialect-rendered"]
  P1["1 bounded recursive hierarchy"]
  P2["2 blocker chains + path arrays"]
  P3["3 UNNEST batch enrichment"]
@@ -139,7 +193,7 @@ flowchart LR
  RET --> BENCH["scripts/benchmark.py<br/>hop latency + bytes billed → cost"]
 ```
 
-Both backends implement one `GraphBackend` Protocol; `GraphRetriever` is a thin facade that maps a typed `GraphFilters` model onto backend calls, so swapping DuckDB ↔ BigQuery is a constructor argument.
+Three seams, all Protocols: `OntologySource` (file or table) supplies the vocabulary, `SqlDialect` absorbs engine differences, and `GraphBackend` is what the patterns run against. `GraphRetriever` is a thin facade mapping a typed `GraphFilters` model onto backend calls — so swapping DuckDB ↔ BigQuery is a constructor argument, and swapping domains is a YAML file.
 
 ## Benchmarks
 
@@ -169,8 +223,22 @@ Honesty section — this pattern has a clearly bounded sweet spot:
 ## Design notes
 
 - **No LangChain / LlamaIndex.** This is the retrieval layer; fewer layers means every query is inspectable. There is deliberately **no LLM dependency** at all.
+- **Each query is written once.** Patterns render through a small `SqlDialect` Protocol (~8 members: parameter style, table qualification, array literal/append/membership, struct aggregation, empty-array handling, top-n-per-group) rather than being authored per engine. Adding a backend is one adapter class, not a rewrite of every pattern.
+- **No SQL transpiler.** SQLGlot and friends were considered and rejected: recursive CTEs with array operations are exactly where transpilers get unreliable, and generated SQL would undercut the point that every query here is readable.
 - **Parameterized by design:** relationship types are always passed as array query parameters (`IN UNNEST(@rel_types)`), never string-interpolated into SQL, with a regression test asserting parameterization.
 - **Deterministic by construction:** the synthetic graph generates from a fixed seed with timestamps derived from a fixed base date — running the generator twice yields byte-identical CSVs.
+
+## Roadmap
+
+Designed but **not built** — listed with the seam each one drops into, so the claim is checkable:
+
+- **Postgres dialect** — one `SqlDialect` implementation in `src/graph_rag/dialects/postgres.py`.
+  `WITH RECURSIVE` is standard SQL; the engine differences are already isolated behind the
+  Protocol (Postgres notably lacks `QUALIFY`, which is why `top_n_per_group` is a dialect member).
+- **MCP server** — tool schemas generated from the registry, which is why `description` is a
+  required field on every entity and relationship type.
+- **Real public datasets** — loaders for deps.dev, MITRE ATT&CK, or GLEIF ownership. The registry
+  is what makes this a data task rather than a rewrite.
 
 ## Provenance & license
 
