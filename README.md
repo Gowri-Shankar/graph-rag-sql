@@ -1,5 +1,8 @@
 # graph-rag-sql
 
+[![CI](https://github.com/Gowri-Shankar/graph-rag-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/Gowri-Shankar/graph-rag-sql/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > Graph traversal for RAG **without a graph database** — recursive-CTE patterns on a SQL warehouse, inspired by a public engineering write-up on graph-DB-to-warehouse migrations.
 
 Answers questions like **"What blocks Project Atlas?"** — with the full dependency *path*, not just the endpoints — using nothing but `WITH RECURSIVE` SQL on the same warehouse that already holds your data. Runs locally on DuckDB in seconds (zero cloud setup), and on BigQuery for the production path.
@@ -19,9 +22,7 @@ That standard answer has a hidden cost: **two storage systems that must agree**.
 
 For **bounded traversals (3–5 hops)** over data that already lives in a warehouse, you don't need a graph database at all. Recursive CTEs give you hierarchy walks, dependency chains, and batch enrichment in plain SQL — with **atomic consistency for free**, because the graph *is* the warehouse tables.
 
-A public engineering post — [Why We Traded a Graph Database for BigQuery CTEs](https://www.latentview.com/blog/why-we-traded-a-graph-database-for-bigquery-ctes/) — describes this trade-off playing out in production, with a managed graph database replaced at roughly **94% lower cost (~$50/year vs ~$800/month)** and end-to-end latency dominated by LLM generation, not retrieval.
-
-**This repo is an independent implementation of that general idea** — built from scratch on a fully synthetic dataset, with its own schema, query design, and API. It isn't a copy or sanitized export of any production codebase; it's my own take on the "recursive CTEs instead of a graph DB" pattern, written to explore the approach and to have a clean, reusable reference implementation.
+Prior art: [Why We Traded a Graph Database for BigQuery CTEs](https://www.latentview.com/blog/why-we-traded-a-graph-database-for-bigquery-ctes/) describes this trade-off playing out in production — a managed graph database replaced at roughly **94% lower cost (~$50/year vs ~$800/month)**, with end-to-end latency dominated by LLM generation, not retrieval.
 
 ## The three patterns
 
@@ -134,8 +135,13 @@ CREATE VIEW graph_edges AS
 
 ```python
 ontology  = FileOntologySource("my_domain.yaml").load()
-retriever = GraphRetriever(backend, ontology=ontology)
-retriever.traverse("svc-checkout", semantic="upstream", max_depth=2)
+backend   = DuckDBGraphBackend.from_csv("nodes.csv", "edges.csv", ontology)
+retriever = GraphRetriever(backend)
+retriever.traverse(GraphFilters(
+    entity_id="svc-checkout",
+    rel_type=resolve_semantic(ontology, "upstream"),
+    rel_max_depth=2,
+))
 ```
 
 This is **verified, not asserted**: `tests/test_conformance.py` runs all three patterns against
@@ -150,14 +156,62 @@ Protocol — so adding a traversable relationship type is an `INSERT`, not a red
 ### 2-minute demo — no cloud, no keys
 
 ```bash
-git clone https://github.com/OWNER/graph-rag-sql && cd graph-rag-sql
+git clone https://github.com/Gowri-Shankar/graph-rag-sql && cd graph-rag-sql
 pip install -e .
 python demo.py
 ```
 
 Loads a bundled synthetic org graph (~375 entities, ~600 relationships, seeded and deterministic) into in-memory DuckDB and prints the blocker chain behind *Project Atlas*, its hierarchy, owners, risks, and a one-query batch enrichment.
 
-<!-- TODO(M2): paste real demo.py output here once it runs -->
+```
+======================================================================
+Graph stats
+======================================================================
+375 entities, 531 relationships (in-memory DuckDB)
+
+======================================================================
+What blocks Project Atlas?
+======================================================================
+5 blockers found, up to 5 hops deep:
+
+  [distance 1] Atlas blocker task 1 -[blocks]-> Project Atlas
+  [distance 2] Atlas blocker task 2 -[blocks]-> Atlas blocker task 1 -[blocks]-> Project Atlas
+  [distance 3] Atlas blocker task 3 -[blocks]-> Atlas blocker task 2 -[blocks]-> Atlas blocker task 1 -[blocks]-> Project Atlas
+  [distance 4] Atlas blocker task 4 -[blocks]-> Atlas blocker task 3 -[blocks]-> Atlas blocker task 2 -[blocks]-> Atlas blocker task 1 -[blocks]-> Project Atlas
+  [distance 5] Atlas blocker task 5 -[blocks]-> Atlas blocker task 4 -[blocks]-> Atlas blocker task 3 -[blocks]-> Atlas blocker task 2 -[blocks]-> Atlas blocker task 1 -[blocks]-> Project Atlas
+
+======================================================================
+Project Atlas hierarchy (up to its Goal)
+======================================================================
+  depth 1: Q1 Resilience Initiative 0 (Initiative)
+  depth 2: FY26 Quality Goal 0 (Goal)
+
+======================================================================
+Owners and risks
+======================================================================
+Owners: Rowan Carter
+Risks:  Risk: security gap #0
+
+======================================================================
+Batch enrichment: 1 query vs the 12+ queries this replaces
+======================================================================
+Enriched 3 entities with ONE query (naive approach: 3 x 4 lookups = 12+ queries)
+
+  proj-atlas: 2 ancestors, 2 blockers, 1 risks, 1 owners
+  proj-1: 2 ancestors, 0 blockers, 0 risks, 1 owners
+  proj-0: 2 ancestors, 0 blockers, 0 risks, 1 owners
+
+======================================================================
+Goal status summary (recursive counts)
+======================================================================
+  FY26 Expansion Goal 3 [not_started]: 3 initiatives, 9 projects, 50 tasks
+  FY26 Expansion Goal 4 [in_progress]: 3 initiatives, 8 projects, 45 tasks
+  FY26 Quality Goal 0 [not_started]: 3 initiatives, 10 projects, 55 tasks
+  FY26 Quality Goal 2 [in_progress]: 3 initiatives, 9 projects, 50 tasks
+  FY26 Retention Goal 1 [at_risk]: 3 initiatives, 9 projects, 50 tasks
+
+Total runtime: 0.32s
+```
 
 ### Production path — BigQuery (free sandbox works)
 
@@ -197,14 +251,16 @@ Three seams, all Protocols: `OntologySource` (file or table) supplies the vocabu
 
 ## Benchmarks
 
-<!-- TODO(M4): replace with the real table from `python scripts/benchmark.py` -->
+DuckDB numbers below are from `python scripts/benchmark.py --backend duckdb --scale demo --runs 5` on a single run of the demo-scale synthetic graph (375 entities, 531 relationships), on a Windows 11 laptop with an AMD Ryzen 5 4600H and DuckDB 1.5.5 — a relative-shape reference, not a formal benchmark. The BigQuery column wasn't run for this table (no sandbox project provisioned for this session) — run `python scripts/benchmark.py --backend bigquery --scale demo` yourself to reproduce it; the script reports `total_bytes_processed` and an estimated on-demand cost for that column automatically.
 
-| Traversal | DuckDB (local) | BigQuery | BigQuery bytes billed → est. cost |
-|---|---|---|---|
-| 1-hop | TBD | TBD | TBD |
-| 2-hop | TBD | TBD | TBD |
-| 3-hop | TBD | TBD | TBD |
-| 5-hop | TBD | TBD | TBD |
+| Traversal | DuckDB (local), median / p95 ms | BigQuery |
+|---|---|---|
+| 1-hop | 11.22 / 11.75 | run `scripts/benchmark.py --backend bigquery` to reproduce |
+| 2-hop | 12.20 / 13.52 | run `scripts/benchmark.py --backend bigquery` to reproduce |
+| 3-hop | 13.24 / 13.37 | run `scripts/benchmark.py --backend bigquery` to reproduce |
+| 5-hop | 16.30 / 16.83 | run `scripts/benchmark.py --backend bigquery` to reproduce |
+| `find_blockers` (5-hop) | 26.54 / 27.94 | run `scripts/benchmark.py --backend bigquery` to reproduce |
+| `enrich_entities_batch` (10 ids) | 66.51 / 73.22 | run `scripts/benchmark.py --backend bigquery` to reproduce |
 
 Reproduce: `pip install -e ".[bench,bigquery]" && python scripts/benchmark.py`
 
@@ -242,4 +298,4 @@ Designed but **not built** — listed with the seam each one drops into, so the 
 
 ## Provenance & license
 
-This project explores an idea described publicly in the engineering blog post linked above — trading a managed graph database for recursive-CTE traversal on a SQL warehouse. The code, schema, synthetic dataset, and API in this repo are independently written and are not derived from or a copy of any employer's production system. All entities, people, and organizations in the bundled data are fictional. Licensed under MIT — see [LICENSE](LICENSE).
+Explores an idea described publicly in the engineering blog post linked above. All entities, people, and organizations in the bundled data are fictional. Licensed under MIT — see [LICENSE](LICENSE).

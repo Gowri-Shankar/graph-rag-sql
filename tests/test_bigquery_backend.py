@@ -36,8 +36,9 @@ def _make_fake_bigquery_module() -> types.ModuleType:
             self.values = list(values)
 
     class QueryJobConfig:
-        def __init__(self, query_parameters=None):
+        def __init__(self, query_parameters=None, use_query_cache=True):
             self.query_parameters = query_parameters or []
+            self.use_query_cache = use_query_cache
 
     class Client:
         def __init__(self, project=None):
@@ -56,8 +57,9 @@ def _make_fake_bigquery_module() -> types.ModuleType:
 class FakeQueryJob:
     """Stands in for a `bigquery.QueryJob`: `.result()` returns pre-canned rows."""
 
-    def __init__(self, rows: list[dict]) -> None:
+    def __init__(self, rows: list[dict], total_bytes_processed: int | None = None) -> None:
         self._rows = rows
+        self.total_bytes_processed = total_bytes_processed
 
     def result(self):
         return self._rows

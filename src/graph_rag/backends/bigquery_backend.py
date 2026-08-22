@@ -73,6 +73,7 @@ class BigQueryGraphBackend:
         ontology: Ontology,
         project_id: str | None = None,
         dataset_id: str | None = None,
+        use_query_cache: bool = True,
     ) -> None:
         """Connect to BigQuery.
 
@@ -80,6 +81,10 @@ class BigQueryGraphBackend:
             ontology: The vocabulary this backend resolves semantics and depth caps against.
             project_id: GCP project ID. Defaults to the `GCP_PROJECT_ID` env var.
             dataset_id: BigQuery dataset ID. Defaults to the `BQ_DATASET_ID` env var.
+            use_query_cache: Whether BigQuery may serve a query from its results cache. A cache
+                hit reports `total_bytes_processed = 0` (and isn't billed), which understates
+                real traversal cost — `scripts/benchmark.py` passes `False` so its bytes-billed
+                and cost figures reflect a real scan, not a cached rerun.
 
         Raises:
             ImportError: If the `google-cloud-bigquery` package isn't installed.
@@ -106,9 +111,14 @@ class BigQueryGraphBackend:
         self.ontology = ontology
         self.project_id = project_id
         self.dataset_id = dataset_id
+        self.use_query_cache = use_query_cache
         self.dialect = BigQueryDialect(project_id, dataset_id)
         self.client = bigquery.Client(project=project_id)
         self._tc = ontology.table_config
+        # The most recently finished QueryJob, so a caller (e.g. scripts/benchmark.py) can read
+        # total_bytes_processed for cost reporting without this backend taking on a
+        # billing-reporting responsibility of its own.
+        self.last_query_job: Any = None
 
     def reload_ontology(self, ontology: Ontology) -> None:
         """Swap in a newly loaded Ontology without reconnecting — same seam as the DuckDB backend."""
@@ -132,8 +142,12 @@ class BigQueryGraphBackend:
         return query_params
 
     def _execute(self, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        job_config = self._bigquery.QueryJobConfig(query_parameters=self._query_parameters(params))
+        job_config = self._bigquery.QueryJobConfig(
+            query_parameters=self._query_parameters(params),
+            use_query_cache=self.use_query_cache,
+        )
         query_job = self.client.query(sql, job_config=job_config)
+        self.last_query_job = query_job
         rows = []
         for row in query_job.result():
             d = dict(row.items())
