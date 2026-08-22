@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
 class Entity(BaseModel):
@@ -81,3 +81,22 @@ class EnrichmentResult(BaseModel):
     blockers: list[BlockerHit] = []
     risks: list[Entity] = []
     owners: list[Entity] = []
+
+
+class GraphFilters(BaseModel):
+    """Graph-relevant query filters routed by `GraphRetriever` to a `GraphBackend` call.
+
+    Deliberately a slim, graph-only subset of the source's filter dataclass: it drops the
+    source's app-specific fields (digest windows, source_type, thread_id, calendar ranges) and
+    its embedder/deduplicator dependency. This facade routes graph questions to SQL, nothing
+    else.
+    """
+
+    entity_id: str | None = None
+    entity_type: str | None = None
+    status: str | None = None
+    name: str | None = None
+    name_match: Literal["exact", "partial"] = "partial"
+    rel_type: str | list[str] | None = None
+    rel_direction: Literal["in", "out", "both"] = "in"
+    rel_max_depth: int = Field(3, ge=1, le=5)
