@@ -1,0 +1,63 @@
+# A second ontology, in a completely different domain, sharing no type names with the org
+# graph. Used by tests/test_conformance.py as the portability proof: all three patterns must
+# run against this ontology with ZERO changes to any file under src/graph_rag/patterns/.
+
+name: tiny_domain
+version: "1.0"
+
+entity_types:
+  - name: Service
+    description: A deployed software service.
+  - name: Incident
+    description: An operational incident affecting one or more services.
+  - name: Team
+    description: A team responsible for one or more services.
+
+relationship_types:
+  - name: runs_on
+    description: The source service runs on (is hosted by) the target service or team's infrastructure.
+    source_types: [Service]
+    target_types: [Service, Team]
+    inverse: null
+    traversal: transitive
+    canonical_direction: source_to_target
+    max_depth: 5
+
+  - name: caused_by
+    description: The source incident was caused by the target incident.
+    source_types: [Incident]
+    target_types: [Incident]
+    inverse: null
+    traversal: transitive
+    canonical_direction: source_to_target
+    max_depth: 2
+
+  - name: on_call_for
+    description: The source team is on call for the target service, team, or incident.
+    source_types: [Team]
+    target_types: [Service, Team, Incident]
+    inverse: null
+    traversal: terminal
+    canonical_direction: source_to_target
+    max_depth: 1
+
+semantics:
+  - name: upstream
+    relationship_types: [caused_by]
+  - name: hierarchy
+    relationship_types: [runs_on]
+  - name: ownership
+    relationship_types: [on_call_for]
+  - name: risk
+    relationship_types: [caused_by]
+
+table_config:
+  node_table: canonical_entities
+  edge_table: entity_relationships
+  node_id_column: entity_id
+  node_name_column: name
+  node_type_column: type
+  node_status_column: status
+  edge_source_column: source_entity_id
+  edge_target_column: target_entity_id
+  edge_type_column: relationship_type

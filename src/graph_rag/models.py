@@ -15,7 +15,13 @@ from pydantic import BaseModel, field_serializer, field_validator
 
 
 class Entity(BaseModel):
-    """A graph node."""
+    """A graph node.
+
+    `created_at`/`updated_at`/`properties` default to unset because this model doubles as the
+    result shape for lean traversal queries (hierarchy, blockers, owners, risks) that
+    deliberately don't select every column — only the generator and full-row lookups populate
+    every field.
+    """
 
     entity_id: str
     name: str
@@ -26,7 +32,7 @@ class Entity(BaseModel):
     priority: str | None = None
     risk_level: str | None = None
     properties: dict[str, Any] = {}
-    created_at: datetime
+    created_at: datetime | None = None
     updated_at: datetime | None = None
 
     @field_validator("properties", mode="before")
@@ -52,13 +58,19 @@ class Relationship(BaseModel):
 
 
 class BlockerHit(BaseModel):
-    """One entity found while walking a transitive chain (e.g. blockers) back to a target."""
+    """One entity found while walking a transitive chain (e.g. blockers) back to a target.
+
+    `rel_chain` and `name_chain` grow outward from the anchor entity as the traversal recurses
+    — reverse them and append the anchor's own name to render a human-readable path from the
+    farthest blocker to the anchor.
+    """
 
     entity_id: str
     name: str
     status: str | None = None
     distance: int
     rel_chain: list[str]
+    name_chain: list[str]
 
 
 class EnrichmentResult(BaseModel):
