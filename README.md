@@ -287,18 +287,52 @@ Three seams, all Protocols: `OntologySource` (file or table) supplies the vocabu
 
 ## Benchmarks
 
-DuckDB numbers below are from `python scripts/benchmark.py --backend duckdb --scale demo --runs 5` on a single run of the demo-scale synthetic graph (375 entities, 531 relationships), on a Windows 11 laptop with an AMD Ryzen 5 4600H and DuckDB 1.5.5 — a relative-shape reference, not a formal benchmark. The BigQuery column wasn't run for this table (no sandbox project provisioned for this session) — run `python scripts/benchmark.py --backend bigquery --scale demo` yourself to reproduce it; the script reports `total_bytes_processed` and an estimated on-demand cost for that column automatically.
+Two scales, side by side, because the small one alone proves nothing. On a 531-edge table the
+gap between a 1-hop and a 5-hop traversal is a couple of milliseconds — that is Python call
+overhead and query-plan setup, not traversal work. The large column is what actually tests the
+claim.
 
-| Traversal | DuckDB (local), median / p95 ms | BigQuery |
-|---|---|---|
-| 1-hop | 11.22 / 11.75 | run `scripts/benchmark.py --backend bigquery` to reproduce |
-| 2-hop | 12.20 / 13.52 | run `scripts/benchmark.py --backend bigquery` to reproduce |
-| 3-hop | 13.24 / 13.37 | run `scripts/benchmark.py --backend bigquery` to reproduce |
-| 5-hop | 16.30 / 16.83 | run `scripts/benchmark.py --backend bigquery` to reproduce |
-| `find_blockers` (5-hop) | 26.54 / 27.94 | run `scripts/benchmark.py --backend bigquery` to reproduce |
-| `enrich_entities_batch` (10 ids) | 66.51 / 73.22 | run `scripts/benchmark.py --backend bigquery` to reproduce |
+Both columns are from `scripts/benchmark.py --backend duckdb --runs 5` on a Windows 11 laptop
+with an AMD Ryzen 5 4600H and DuckDB 1.5.5 — a relative-shape reference, not a formal
+benchmark. Each row is one untimed warm-up call followed by 5 timed ones; the second figure is
+the **max** of those 5, not a p95, because a percentile over 5 samples is a max wearing a
+better name.
 
-Reproduce: `pip install -e ".[bench,bigquery]" && python scripts/benchmark.py`
+| Traversal | demo — median / max ms<br/>375 nodes, 531 edges | large — median / max ms<br/>20,226 nodes, 29,833 edges | BigQuery |
+|---|---|---|---|
+| 1-hop | 9.97 / 10.58 | 11.73 / 12.80 | not run — see below |
+| 2-hop | 12.57 / 13.26 | 13.60 / 15.50 | not run — see below |
+| 3-hop | 13.42 / 13.53 | 16.63 / 17.96 | not run — see below |
+| 5-hop | 15.26 / 16.03 | 18.72 / 20.42 | not run — see below |
+| `find_blockers` (5-hop) | 26.28 / 28.00 | 45.06 / 47.32 | not run — see below |
+| `enrich_entities_batch` (10 ids) | 61.37 / 64.12 | 69.71 / 73.94 | not run — see below |
+
+**The finding:** ~54x more data costs about 1.2x on a 5-hop traversal (15.3 → 18.7 ms) and
+about 1.7x on `find_blockers` (26.3 → 45.1 ms). Growth is strongly sub-linear in graph size,
+which is the whole argument for depth-bounded recursive CTEs over a graph database — a bounded
+walk touches a neighbourhood, so cost tracks the neighbourhood's size rather than the graph's.
+It is not *flat*, and the `find_blockers` row is the one to watch: it fans out over every
+blocking edge reachable within the bound, so it is the first thing that would degrade on a
+denser graph. See [When NOT to do this](#when-not-to-do-this).
+
+Reproduce:
+
+```bash
+pip install -e ".[bench,bigquery]"
+python scripts/benchmark.py --backend duckdb --scale demo  --runs 5
+python scripts/benchmark.py --backend duckdb --scale large --runs 5
+```
+
+`--scale large` generates its graph on the fly into a temp directory — it is ~54x the bundled
+84 KB in `data/`, so it is deliberately **not** committed. Nothing you run above writes into the
+repo.
+
+The BigQuery column wasn't run for this table (no sandbox project provisioned for this session);
+`python scripts/benchmark.py --backend bigquery --scale demo` fills it in, adding
+`total_bytes_processed` and an estimated on-demand cost per row. Numbers are only ever pasted
+here from a real run — the script refuses to report a row that came back empty, because
+`BigQueryGraphBackend.enrich_entities_batch` deliberately swallows exceptions and returns `{}`,
+which would otherwise publish a silently-failing query as the fastest row in the table.
 
 The headline from the referenced production write-up: retrieval was never the bottleneck — LLM generation dominated end-to-end latency, which is exactly what makes warehouse-speed traversal acceptable for RAG.
 

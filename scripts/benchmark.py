@@ -3,8 +3,32 @@
 Times `traverse_relationships` (blocks/depends_on, direction "in") at hop depths 1, 2, 3, 5
 off the planted "Project Atlas" anchor — whose blocker chain is exactly 5 hops deep, so depth 5
 walks the full chain and shorter depths walk a prefix of it — plus one `find_blockers` call and
-one `enrich_entities_batch` call over 10 entities. Every row is run `--runs` times through the
-same `GraphRetriever` a caller would use, and reports median + p95 wall-clock milliseconds.
+one `enrich_entities_batch` call over 10 entities. Every row runs through the same
+`GraphRetriever` a caller would use.
+
+Methodology, and why each choice is what it is:
+
+* **One untimed warm-up call per row**, before the `--runs` timed iterations, so what the
+  timed runs measure is a query the engine has already planned — the steady state a
+  long-lived RAG service actually sees, not a cold first request. Measured honestly, this
+  changes little on DuckDB at these scales: the first call on a fresh backend runs about
+  0.15 ms slower than the steady-state median, which is inside the run-to-run spread. The
+  warm-up is insurance against a startup cost leaking into sample #1 (it matters far more on
+  a network-backed engine), not a correction that moves the published figures.
+* **Median and max, not median and p95.** At the default `--runs 5`, a linear-interpolated p95
+  lands between the 4th and 5th sorted samples, so it IS the max to within a hair — printing it
+  as "p95" would dress up a 5-sample spread as a tail statistic. `max` says exactly what it is.
+  Raise `--runs` to 20+ if you want a figure a percentile label would survive.
+* **Every row must return data.** All rows query the planted "Project Atlas" anchor, which
+  exists at both scales, so an empty result means the query did not really run. That matters
+  most for `enrich_entities_batch`, the one backend method that deliberately swallows
+  exceptions and returns `{}` (see `BigQueryGraphBackend.enrich_entities_batch`): without this
+  check, a silently-failing enrichment query would benchmark as the FASTEST row in the table,
+  and its `total_bytes_processed` would be read stale off the previous call's query job.
+
+Scales: `--scale demo` uses the bundled `data/*.csv` (375 entities / 531 relationships).
+`--scale large` generates ~54x more data on the fly into a temp directory — deliberately not
+bundled, and never written into the repo.
 
 On `--backend bigquery`, each row additionally reports the `total_bytes_processed` BigQuery
 billed for the LAST of those runs (read off `BigQueryGraphBackend.last_query_job`) and an
@@ -25,7 +49,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, NamedTuple
 
 from graph_rag.generator import generate_org_graph, write_csvs
 from graph_rag.models import GraphFilters
@@ -45,25 +69,24 @@ BIGQUERY_PRICE_PER_TIB_USD = 6.25
 BIGQUERY_MIN_BILLED_BYTES_PER_TABLE = 10 * 1024 * 1024
 
 
-def _percentile(samples: list[float], pct: float) -> float:
-    """Linear-interpolated percentile (matches `numpy.percentile`'s default)."""
-    ordered = sorted(samples)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = (len(ordered) - 1) * (pct / 100)
-    lo, hi = int(rank), min(int(rank) + 1, len(ordered) - 1)
-    if lo == hi:
-        return ordered[lo]
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (rank - lo)
+def _time_runs(fn: Callable[[], Any], runs: int) -> tuple[list[float], Any]:
+    """Call `fn` once untimed to warm up, then `runs` more times, timing only those.
 
+    The warm-up absorbs DuckDB query-plan compilation and any first-call lazy import on this
+    path, which would otherwise be charged to the first timed sample and inflate the row.
 
-def _time_runs(fn: Callable[[], Any], runs: int) -> list[float]:
+    Returns:
+        `(samples_ms, last_result)`. The result comes back so the caller can check the query
+        actually returned something — see this module's docstring on silent failures.
+    """
+    fn()  # warm-up: plan compilation and lazy imports, deliberately not measured
     samples = []
+    result = None
     for _ in range(runs):
         start = perf_counter()
-        fn()
+        result = fn()
         samples.append((perf_counter() - start) * 1000)
-    return samples
+    return samples, result
 
 
 def _load_ontology() -> Ontology:
@@ -99,6 +122,21 @@ def _build_bigquery_retriever(scale: str) -> GraphRetriever:
     return GraphRetriever(backend)
 
 
+class BenchRow(NamedTuple):
+    """One benchmarked operation.
+
+    `returned_data` is False when the call came back empty off the planted Atlas anchor, which
+    can only mean the query didn't really run. Such a row is reported as FAILED rather than as
+    a fast one, and its `total_bytes` is dropped — on BigQuery it would otherwise be read stale
+    off the preceding call's query job.
+    """
+
+    label: str
+    samples_ms: list[float]
+    total_bytes: int | None
+    returned_data: bool
+
+
 def _bytes_processed(retriever: GraphRetriever) -> int | None:
     """Bytes BigQuery billed for the most recent call, or None off a backend that doesn't track it."""
     job = getattr(retriever.backend, "last_query_job", None)
@@ -111,30 +149,66 @@ def _bigquery_cost_usd(total_bytes: int) -> float:
     return tebibytes * BIGQUERY_PRICE_PER_TIB_USD
 
 
-def _benchmark_rows(retriever: GraphRetriever, runs: int) -> list[tuple[str, list[float], int | None]]:
-    rows: list[tuple[str, list[float], int | None]] = []
+def _row(label: str, fn: Callable[[], Any], runs: int, retriever: GraphRetriever) -> BenchRow:
+    """Time `fn` and record whether it returned anything at all."""
+    samples, result = _time_runs(fn, runs)
+    returned_data = bool(result)
+    return BenchRow(
+        label=label,
+        samples_ms=samples,
+        # Stale bytes off the previous call would be worse than no number at all.
+        total_bytes=_bytes_processed(retriever) if returned_data else None,
+        returned_data=returned_data,
+    )
+
+
+def _benchmark_rows(retriever: GraphRetriever, runs: int) -> list[BenchRow]:
+    rows: list[BenchRow] = []
 
     for depth in HOP_DEPTHS:
         filters = GraphFilters(
             entity_id=ATLAS_ID, rel_type=UPSTREAM_REL_TYPES, rel_direction="in", rel_max_depth=depth
         )
-        samples = _time_runs(lambda filters=filters: retriever.traverse(filters), runs)
-        rows.append((f"{depth}-hop traversal", samples, _bytes_processed(retriever)))
+        rows.append(
+            _row(
+                f"{depth}-hop traversal",
+                lambda filters=filters: retriever.traverse(filters),
+                runs,
+                retriever,
+            )
+        )
 
-    samples = _time_runs(lambda: retriever.find_blockers(ATLAS_ID, max_depth=5), runs)
-    rows.append(("find_blockers (5-hop)", samples, _bytes_processed(retriever)))
+    rows.append(
+        _row(
+            "find_blockers (5-hop)",
+            lambda: retriever.find_blockers(ATLAS_ID, max_depth=5),
+            runs,
+            retriever,
+        )
+    )
 
     # proj-0..proj-8 are generated at both "demo" and "large" scale — see generator.py.
     sample_ids = [ATLAS_ID] + [f"proj-{i}" for i in range(ENRICH_BATCH_SIZE - 1)]
-    samples = _time_runs(lambda: retriever.enrich_batch(sample_ids), runs)
-    rows.append((f"enrich_entities_batch({ENRICH_BATCH_SIZE} ids)", samples, _bytes_processed(retriever)))
+    rows.append(
+        _row(
+            f"enrich_entities_batch({ENRICH_BATCH_SIZE} ids)",
+            lambda: retriever.enrich_batch(sample_ids),
+            runs,
+            retriever,
+        )
+    )
 
     return rows
 
 
-def _print_table(backend_name: str, rows: list[tuple[str, list[float], int | None]]) -> None:
+def _print_table(backend_name: str, rows: list[BenchRow], runs: int) -> None:
+    """Print the results as a markdown table.
+
+    The `max (ms, n=N)` header names the statistic actually computed — `max(samples)`. See the
+    module docstring for why this is not labelled p95 at small `--runs`.
+    """
     is_bigquery = backend_name == "bigquery"
-    header = "| Traversal | Median (ms) | p95 (ms) |"
+    header = f"| Traversal | Median (ms) | Max (ms, n={runs}) |"
     sep = "|---|---|---|"
     if is_bigquery:
         header += " Bytes billed | Est. cost |"
@@ -142,14 +216,39 @@ def _print_table(backend_name: str, rows: list[tuple[str, list[float], int | Non
     print(header)
     print(sep)
 
-    for label, samples, total_bytes in rows:
-        line = f"| {label} | {statistics.median(samples):.2f} | {_percentile(samples, 95):.2f} |"
+    for row in rows:
+        if not row.returned_data:
+            line = f"| {row.label} | FAILED | FAILED |"
+            if is_bigquery:
+                line += " n/a | n/a |"
+            print(line)
+            continue
+        line = (
+            f"| {row.label} | {statistics.median(row.samples_ms):.2f} "
+            f"| {max(row.samples_ms):.2f} |"
+        )
         if is_bigquery:
-            if total_bytes is None:
+            if row.total_bytes is None:
                 line += " n/a | n/a |"
             else:
-                line += f" {total_bytes:,} B | ${_bigquery_cost_usd(total_bytes):.6f} |"
+                line += f" {row.total_bytes:,} B | ${_bigquery_cost_usd(row.total_bytes):.6f} |"
         print(line)
+
+    failed = [row.label for row in rows if not row.returned_data]
+    if failed:
+        print()
+        print(
+            "WARNING: these rows returned no data and are NOT valid measurements: "
+            + ", ".join(failed)
+            + "."
+        )
+        print(
+            "Every row queries the planted 'Project Atlas' anchor and must return "
+            "something, so an empty result means the query did not run. "
+            "`BigQueryGraphBackend.enrich_entities_batch` deliberately catches exceptions "
+            "and returns an empty dict — a failure there would otherwise time as the "
+            "FASTEST row in this table. Do not publish these numbers; fix the query first."
+        )
 
     if is_bigquery:
         print(
@@ -174,7 +273,7 @@ def main() -> None:
         else _build_bigquery_retriever(args.scale)
     )
     rows = _benchmark_rows(retriever, args.runs)
-    _print_table(args.backend, rows)
+    _print_table(args.backend, rows, args.runs)
 
     try:
         import matplotlib  # noqa: F401
@@ -183,15 +282,19 @@ def main() -> None:
     _save_latency_chart(rows)
 
 
-def _save_latency_chart(rows: list[tuple[str, list[float], int | None]]) -> None:
-    """Save `benchmark_latency.png` — only runs if the optional `[bench]` extra is installed."""
+def _save_latency_chart(rows: list[BenchRow]) -> None:
+    """Save `benchmark_latency.png` — only runs if the optional `[bench]` extra is installed.
+
+    Rows that returned no data are omitted rather than charted as fast ones.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    labels = [label for label, _, _ in rows]
-    medians = [statistics.median(samples) for _, samples, _ in rows]
+    plotted = [row for row in rows if row.returned_data]
+    labels = [row.label for row in plotted]
+    medians = [statistics.median(row.samples_ms) for row in plotted]
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.barh(labels, medians, color="#4C72B0")

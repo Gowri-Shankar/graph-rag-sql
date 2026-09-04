@@ -459,8 +459,9 @@ def generate_org_graph(
 
     Args:
         seed: Random seed; identical seeds produce byte-identical output.
-        scale: ``"demo"`` (~375 nodes, ~600 edges, bundled in git) or ``"large"``
-            (~20k nodes, ~60k edges, for benchmarking — not bundled).
+        scale: ``"demo"`` (375 nodes, 531 edges, bundled in git) or ``"large"``
+            (20,226 nodes, 29,833 edges, for benchmarking — generated on the fly, not
+            bundled; it is ~54x the bundled data and must not be committed).
 
     Returns:
         A tuple of (entities, relationships).
