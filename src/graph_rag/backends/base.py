@@ -46,6 +46,49 @@ def order_by_declared_relationship_type(
     )
 
 
+# Severity vocabulary for `risk_level`, most severe first. This lives here as a plain default
+# rather than as an ontology field because the registry models the status/severity COLUMN
+# (`TableConfig.node_status_column`, `node_extra_columns`) but no status or severity VOCABULARY
+# — and `dialects/base.py`'s "only add a member when two real engines spell it differently"
+# sets the precedent for resisting permanent surface bought for a presentation concern. Pass
+# `severity_order` to `order_by_severity` for a domain that grades risk differently.
+DEFAULT_SEVERITY_ORDER = ["critical", "high", "medium", "low"]
+
+
+def order_by_severity(
+    entities: list[Entity], severity_order: list[str] | None = None
+) -> list[Entity]:
+    """Sort risk `entities` most severe first, falling back to name order.
+
+    Keyed on `Entity.risk_level`, matched case-insensitively against `severity_order`. Levels
+    absent from that list — and rows with no `risk_level` at all — sort last, with name as the
+    tiebreaker so the result is fully determined rather than left to whatever order the engine
+    happened to return.
+
+    `risk_level` is an OPTIONAL column: it reaches `Entity` only when a domain declares it in
+    `TableConfig.node_extra_columns`, which defaults to `[]`. When it is absent every row
+    shares the same severity key and this degrades to plain name order — the documented,
+    non-exceptional outcome, not an error.
+
+    Ordering here rather than in SQL is what makes both backends agree. The ported BigQuery
+    query did this with an `ORDER BY CASE` ladder over four hardcoded status values that the
+    DuckDB backend had no counterpart for, so the same Protocol method returned two different
+    orders. Worse, the ladder keyed on the STATUS column: every bundled Risk row's status reads
+    'open', so none of those four values matched a single row and the ordering was inert while
+    the docstring promised severity. Severity lives in `risk_level`, which is why this keys on
+    that instead.
+    """
+    order = severity_order if severity_order is not None else DEFAULT_SEVERITY_ORDER
+    priority = {level.casefold(): i for i, level in enumerate(order)}
+    return sorted(
+        entities,
+        key=lambda e: (
+            priority.get((e.risk_level or "").casefold(), len(order)),
+            e.name or "",
+        ),
+    )
+
+
 def pivot_descendant_counts(rows: list[dict[str, Any]], count_types: list[str]) -> list[dict]:
     """Fold `(root, descendant_type, n)` rows into one row per root with a `counts` dict.
 

@@ -184,3 +184,28 @@ def test_alt_schema_results_are_not_vacuous(tmp_path):
     assert {
         row["entity_id"]: row["counts"]["Service"] for row in backend.get_descendant_counts("Service")
     } == {"svc-a": 0, "svc-b": 1, "svc-c": 2}
+
+
+def test_risk_ordering_degrades_to_name_order_without_risk_level():
+    """On a four-column schema `risk_level` does not exist — ordering must degrade, not raise.
+
+    `tiny_domain_alt_schema.yaml` declares no `node_extra_columns`, so `Entity.risk_level` is
+    None on every row and the severity key is uniform. The documented fallback is name order,
+    which is what makes "most severe first" a safe promise on a minimal schema rather than a
+    claim that only holds when an optional column happens to be declared.
+    """
+    backend = _build_alt_schema_backend()
+    # Two more incidents that both caused inc-1, so two "risks" come back for one entity.
+    backend.conn.executemany(
+        "INSERT INTO graph_nodes VALUES (?, ?, ?, ?)",
+        [["inc-9", "Zulu Incident", "Incident", "open"],
+         ["inc-8", "Alpha Incident", "Incident", "open"]],
+    )
+    backend.conn.executemany(
+        "INSERT INTO graph_edges VALUES (?, ?, ?)",
+        [["inc-9", "inc-1", "caused_by"], ["inc-8", "inc-1", "caused_by"]],
+    )
+
+    risks = backend.find_risks_for_entity("inc-1")
+    assert all(r.risk_level is None for r in risks)
+    assert [r.name for r in risks] == ["Alpha Incident", "Middle Incident", "Zulu Incident"]

@@ -29,6 +29,7 @@ from graph_rag.backends.base import (
     DESCENDANT_COUNT_COLUMN,
     DESCENDANT_TYPE_COLUMN,
     order_by_declared_relationship_type,
+    order_by_severity,
     pivot_descendant_counts,
 )
 from graph_rag.dialects.duckdb import DuckDbDialect
@@ -246,11 +247,21 @@ class DuckDBGraphBackend:
     # expected to re-implement them directly rather than share a pattern module.
 
     def find_risks_for_entity(self, entity_id: str) -> list[Entity]:
-        """Find risks that threaten `entity_id` or any of its descendants.
+        """Find risks that threaten `entity_id` or any of its descendants, most severe first.
 
-        Relies on the ontology's own domain/range guarantee for the `threats` semantic's
-        relationship types (only a `Risk`-typed entity can be the source of a `threatens`
-        edge) rather than an extra `type = 'Risk'` literal filter.
+        "Most severe first" means by `risk_level` (critical > high > medium > low), applied by
+        the shared `order_by_severity` helper so both backends return the SAME order — the
+        ordering is not in the SQL. `risk_level` is an optional column, present only when a
+        domain declares it in `TableConfig.node_extra_columns`; when it is absent the result
+        degrades to name order rather than raising.
+
+        Rows are deduplicated with `SELECT DISTINCT`, matching `get_entity_owners`: a risk that
+        threatens both `entity_id` and one of its descendants joins once per path through
+        `entity_and_children` and would otherwise be returned once per join.
+
+        Relies on the ontology's own domain/range guarantee for the risk semantic's
+        relationship types (only a `Risk`-typed entity can source a `threatens` edge) rather
+        than an extra `type = 'Risk'` literal filter.
         """
         tc = self._tc
         hierarchy_rel_types = resolve_semantic(self.ontology, _HIERARCHY_SEMANTIC)
@@ -287,7 +298,7 @@ class DuckDBGraphBackend:
                 UNION
                 SELECT entity_id FROM children
             )
-            SELECT {tc.node_projection("risk")}
+            SELECT DISTINCT {tc.node_projection("risk")}
             FROM {tc.edge_table} r
             JOIN {tc.node_table} risk ON r.{tc.edge_source_column} = risk.{tc.node_id_column}
             JOIN entity_and_children target ON r.{tc.edge_target_column} = target.entity_id
@@ -301,7 +312,7 @@ class DuckDBGraphBackend:
                 "risk_rel_types": risk_rel_types,
             },
         )
-        return [Entity(**row) for row in rows]
+        return order_by_severity([Entity(**row) for row in rows])
 
     def get_entity_owners(self, entity_id: str) -> list[Entity]:
         """Find people who own or are accountable for `entity_id`, owners first.

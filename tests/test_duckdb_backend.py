@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from graph_rag.backends.base import DEFAULT_SEVERITY_ORDER, order_by_severity
+
 
 def test_get_entity_hierarchy_returns_entity_itself(tiny_graph_backend):
     result = tiny_graph_backend.get_entity_hierarchy("proj-1", direction="both")
@@ -64,6 +66,38 @@ def test_find_risks_for_entity_via_transitive_descendant(tiny_graph_backend):
     """
     risks = tiny_graph_backend.find_risks_for_entity("goal-1")
     assert sorted(r.name for r in risks) == ["Risk One", "Risk Two"]
+
+
+def test_find_risks_for_entity_orders_by_severity_not_name(tiny_graph_backend):
+    """Risks come back most severe first, by `risk_level` — not in name or engine order.
+
+    goal-1 reaches both risks. risk-2 is `critical` and risk-1 is `high`, so severity order is
+    the REVERSE of name order; asserting the severity order therefore also rules out a plain
+    name sort and whatever order DuckDB happens to return. Before this, DuckDB had no ORDER BY
+    at all and BigQuery had a status-priority `CASE` whose four status values matched no row in
+    the bundled data, so the promised "most severe first" was unimplemented on both.
+    """
+    risks = tiny_graph_backend.find_risks_for_entity("goal-1")
+    assert [r.name for r in risks] == ["Risk Two", "Risk One"]
+    assert [r.risk_level for r in risks] == ["critical", "high"]
+
+
+def test_find_risks_for_entity_severity_order_is_configurable(tiny_graph_backend, org_ontology):
+    """The severity vocabulary is a default, not a hardcoded rule: reversing it flips the order."""
+    risks = tiny_graph_backend.find_risks_for_entity("goal-1")
+    reversed_order = list(reversed(DEFAULT_SEVERITY_ORDER))
+    assert [r.name for r in order_by_severity(risks, reversed_order)] == ["Risk One", "Risk Two"]
+
+
+def test_find_risks_for_entity_deduplicates_a_risk_reached_by_two_paths(tiny_graph_backend):
+    """risk-1 threatens proj-1 AND its child task-1, so it joins twice — but must return once.
+
+    `entity_and_children` yields both proj-1 and task-1, and the threat join matches each, so
+    without a DISTINCT the same risk came back once per path.
+    """
+    risks = tiny_graph_backend.find_risks_for_entity("proj-1")
+    assert [r.name for r in risks] == ["Risk One"]
+    assert len(risks) == len({r.entity_id for r in risks}) == 1
 
 
 def test_find_risks_for_entity_excludes_risk_on_an_ancestor(tiny_graph_backend):

@@ -18,12 +18,19 @@ def org_ontology() -> Ontology:
     return Ontology.from_source(FileOntologySource(ORG_GRAPH_PATH))
 
 
-def _entity(entity_id: str, name: str, type_: str, status: str = "in_progress") -> Entity:
+def _entity(
+    entity_id: str,
+    name: str,
+    type_: str,
+    status: str = "in_progress",
+    risk_level: str | None = None,
+) -> Entity:
     return Entity(
         entity_id=entity_id,
         name=name,
         type=type_,
         status=status,
+        risk_level=risk_level,
         created_at=datetime(2025, 1, 1),
     )
 
@@ -54,6 +61,7 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         person-2 --accountable_for--> goal-1
         person-2 --accountable_for--> proj-1
         risk-1 --threatens--> proj-1
+        risk-1 --threatens--> task-1
         risk-2 --threatens--> init-1
 
     The two risks sit at deliberately different depths so descendant-walk direction is
@@ -63,6 +71,13 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
 
     proj-1 has an `owns` owner and an `accountable_for` owner so `get_entity_owners`' ordering
     is observable at all: with a single owner, any ordering rule looks correct.
+
+    risk-1 threatens proj-1 AND task-1, one of proj-1's own children, so it reaches proj-1 by
+    two paths through the descendant walk — ordinary data (a risk logged against a project and
+    against one of its tasks) that returned the same risk twice before `find_risks_for_entity`
+    deduplicated. The two risks' `risk_level` values are deliberately INVERSE to their name
+    order — risk-2 is `critical` while risk-1 is `high` — so a severity sort and a name sort
+    give different answers and a test can tell them apart.
     """
     entities = [
         _entity("goal-1", "Goal One", "Goal"),
@@ -74,8 +89,8 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         _entity("task-4", "Task Four", "Task"),
         _entity("person-1", "Person One", "Person", status="active"),
         _entity("person-2", "Person Two", "Person", status="active"),
-        _entity("risk-1", "Risk One", "Risk", status="open"),
-        _entity("risk-2", "Risk Two", "Risk", status="open"),
+        _entity("risk-1", "Risk One", "Risk", status="open", risk_level="high"),
+        _entity("risk-2", "Risk Two", "Risk", status="open", risk_level="critical"),
     ]
     relationships = [
         _edge("init-1", "goal-1", "belongs_to"),
@@ -91,6 +106,7 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         _edge("person-2", "goal-1", "accountable_for"),
         _edge("person-2", "proj-1", "accountable_for"),
         _edge("risk-1", "proj-1", "threatens"),
+        _edge("risk-1", "task-1", "threatens"),
         _edge("risk-2", "init-1", "threatens"),
     ]
 

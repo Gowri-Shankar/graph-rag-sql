@@ -339,6 +339,29 @@ def test_full_row_projections_render_through_node_projection(fake_bigquery, org_
     assert " ".join(org_ontology.table_config.node_projection().split()) in sql
 
 
+def test_find_risks_for_entity_carries_no_status_literals_and_dedupes(fake_bigquery, org_ontology):
+    """Risk ordering left the SQL entirely, and the query now deduplicates.
+
+    This backend used to end with an `ORDER BY CASE` over four hardcoded status values while
+    the DuckDB backend had no ORDER BY at all — the same Protocol method, two different
+    contracts. Worse, it keyed on the status column, where every bundled Risk row reads 'open',
+    so none of the four values matched and the ordering was inert. Severity now comes from
+    `risk_level` via the shared `order_by_severity`, so no status literal and no ORDER BY
+    belong in this SQL. The `DISTINCT` matches `get_entity_owners` and stops a risk that
+    threatens both an entity and its descendant from being returned once per join path.
+
+    Structural assertions because this backend has no executable coverage — the DuckDB tests
+    pin the resulting order, and both methods share one helper and one docstring.
+    """
+    backend = _make_backend(fake_bigquery, org_ontology)
+    sql, _ = _capture_sql(backend, lambda: backend.find_risks_for_entity("proj-atlas"))
+
+    for status_literal in ("'materialized'", "'mitigating'", "'being_monitored'", "'identified'"):
+        assert status_literal not in sql
+    assert "ORDER BY" not in sql
+    assert "SELECT DISTINCT" in sql
+
+
 def test_get_entity_owners_carries_no_relationship_type_literals(fake_bigquery, org_ontology):
     """Owner priority comes from the registry, so no type literal belongs in this SQL.
 
