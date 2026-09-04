@@ -240,6 +240,40 @@ def test_enrich_entities_batch_empty_input_short_circuits(fake_bigquery, org_ont
     assert backend.enrich_entities_batch([]) == {}
 
 
+def test_find_risks_for_entity_recursive_step_walks_downward(fake_bigquery, org_ontology):
+    """Structural regression guard for the descendant-walk direction.
+
+    There is no executable BigQuery path in this suite, so the DuckDB behavioral tests
+    (`tests/test_duckdb_backend.py`) can't cover this backend's copy of the same SQL. Assert
+    the join structure instead: the `children` CTE's recursive step must join on the edge's
+    TARGET (parent) column and select the SOURCE (child) side, exactly as its base case does
+    and as `patterns/hierarchy.py` does for direction="down". Joining on the source column
+    instead walks back UP to the parent, which both misses deeper descendants and wrongly
+    attributes an ancestor's risks to the anchor entity.
+    """
+    backend = _make_backend(fake_bigquery, org_ontology)
+    captured = {}
+
+    def fake_query(sql, job_config=None):
+        captured["sql"] = sql
+        return FakeQueryJob([])
+
+    backend.client.query = fake_query
+    backend.find_risks_for_entity("proj-atlas")
+
+    sql = " ".join(captured["sql"].split())
+    edges = "`test-project.test_dataset.entity_relationships`"
+    entities = "`test-project.test_dataset.canonical_entities`"
+
+    # Base case: match the parent (target) side, project the child (source) side.
+    assert "WHERE r.target_entity_id = @entity_id" in sql
+    # Recursive step: same direction as the base case.
+    assert f"JOIN {edges} r ON c.entity_id = r.target_entity_id" in sql
+    assert f"JOIN {entities} e ON r.source_entity_id = e.entity_id" in sql
+    # The inverted form, which walked child -> parent and only ever reached direct children.
+    assert "ON c.entity_id = r.source_entity_id" not in sql
+
+
 def test_get_entity_owners_qualifies_table_name(fake_bigquery, org_ontology):
     backend = _make_backend(fake_bigquery, org_ontology)
     captured = {}

@@ -274,8 +274,8 @@ class DuckDBGraphBackend:
 
                 SELECT e.{tc.node_id_column}, c.depth + 1
                 FROM children c
-                JOIN {tc.edge_table} r ON c.entity_id = r.{tc.edge_source_column}
-                JOIN {tc.node_table} e ON r.{tc.edge_target_column} = e.{tc.node_id_column}
+                JOIN {tc.edge_table} r ON c.entity_id = r.{tc.edge_target_column}
+                JOIN {tc.node_table} e ON r.{tc.edge_source_column} = e.{tc.node_id_column}
                 WHERE {hierarchy_membership}
                     AND c.depth < {int(depth)}
             ),

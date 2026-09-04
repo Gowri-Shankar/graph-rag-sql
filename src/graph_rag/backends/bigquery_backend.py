@@ -296,8 +296,8 @@ class BigQueryGraphBackend:
 
                 SELECT e.{tc.node_id_column}, c.depth + 1
                 FROM children c
-                JOIN {edges} r ON c.entity_id = r.{tc.edge_source_column}
-                JOIN {entities} e ON r.{tc.edge_target_column} = e.{tc.node_id_column}
+                JOIN {edges} r ON c.entity_id = r.{tc.edge_target_column}
+                JOIN {entities} e ON r.{tc.edge_source_column} = e.{tc.node_id_column}
                 WHERE {hierarchy_membership}
                     AND c.depth < {int(depth)}
             ),

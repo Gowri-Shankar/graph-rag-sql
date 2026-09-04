@@ -40,8 +40,8 @@ def _edge(source: str, target: str, rel_type: str) -> Relationship:
 @pytest.fixture
 def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
     """A hand-written ~12-node graph with a known hierarchy, a known 3-hop blocker chain,
-    one risk, and one owner — small enough that every assertion in test_patterns.py and
-    test_duckdb_backend.py is exact.
+    two risks at different hierarchy levels, and one owner — small enough that every
+    assertion in test_patterns.py and test_duckdb_backend.py is exact.
 
     Shape:
         goal-1 <- init-1 <- proj-1 <- task-1 <- task-2 <- task-3 <- task-4  (blocks chain,
@@ -52,6 +52,12 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         person-1 --owns--> proj-1
         person-2 --accountable_for--> goal-1
         risk-1 --threatens--> proj-1
+        risk-2 --threatens--> init-1
+
+    The two risks sit at deliberately different depths so descendant-walk direction is
+    testable in both directions of error: from goal-1, risk-1 is a 2-hop descendant hit
+    (a walk that only reaches direct children misses it), while from proj-1, risk-2 sits on
+    an ANCESTOR and must not appear (a walk that oscillates child->parent wrongly finds it).
     """
     entities = [
         _entity("goal-1", "Goal One", "Goal"),
@@ -64,6 +70,7 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         _entity("person-1", "Person One", "Person", status="active"),
         _entity("person-2", "Person Two", "Person", status="active"),
         _entity("risk-1", "Risk One", "Risk", status="open"),
+        _entity("risk-2", "Risk Two", "Risk", status="open"),
     ]
     relationships = [
         _edge("init-1", "goal-1", "belongs_to"),
@@ -78,6 +85,7 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         _edge("person-1", "proj-1", "owns"),
         _edge("person-2", "goal-1", "accountable_for"),
         _edge("risk-1", "proj-1", "threatens"),
+        _edge("risk-2", "init-1", "threatens"),
     ]
 
     entities_csv = tmp_path / "entities.csv"
