@@ -170,6 +170,7 @@ retriever.traverse(GraphFilters(
     entity_id="inc-1",
     rel_type=resolve_semantic(ontology, "upstream"),
     rel_max_depth=2,
+    rel_direction="out",   # follow caused_by from effect to cause; "in" walks the other way
 ))
 # → [{'entity_id': 'inc-2', 'name': 'Middle Incident', ..., 'depth': 1},
 #    {'entity_id': 'inc-3', 'name': 'Leaf Incident',  ..., 'depth': 2}]
