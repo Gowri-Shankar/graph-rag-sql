@@ -87,11 +87,17 @@ def test_find_by_name_no_match_returns_none(tiny_graph_backend):
     assert tiny_graph_backend.find_by_name("nonexistent-xyz", exact=True) is None
 
 
-def test_get_goals_status_summary_counts_transitive_children(tiny_graph_backend):
-    summary = tiny_graph_backend.get_goals_status_summary()
+def test_get_descendant_counts_counts_transitive_children(tiny_graph_backend):
+    summary = tiny_graph_backend.get_descendant_counts("Goal", ["Initiative", "Project", "Task"])
     assert len(summary) == 1
     goal = summary[0]
     assert goal["name"] == "Goal One"
-    assert goal["initiative_count"] == 1
-    assert goal["project_count"] == 1
-    assert goal["task_count"] == 4
+    assert goal["counts"] == {"Initiative": 1, "Project": 1, "Task": 4}
+
+
+def test_get_descendant_counts_defaults_count_types_to_the_whole_ontology(tiny_graph_backend):
+    """With no `count_types`, every declared entity type appears — zero-filled if absent."""
+    goal = tiny_graph_backend.get_descendant_counts("Goal")[0]
+    assert goal["counts"] == {
+        "Goal": 0, "Initiative": 1, "Project": 1, "Task": 4, "Person": 0, "Risk": 0
+    }

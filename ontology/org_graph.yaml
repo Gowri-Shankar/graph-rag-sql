@@ -95,3 +95,6 @@ table_config:
   edge_source_column: source_entity_id
   edge_target_column: target_entity_id
   edge_type_column: relationship_type
+  # Optional. Everything past the four required columns above — these map onto `Entity`'s
+  # optional fields. A minimal four-column node view can omit this list entirely.
+  node_extra_columns: [owner_id, description, priority, risk_level, properties, created_at, updated_at]

@@ -9,9 +9,36 @@ the right dialect. Swapping DuckDB for BigQuery (or Postgres, later) is choosing
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from graph_rag.models import BlockerHit, EnrichmentResult, Entity
+
+# The column a descendant-count query names its per-row entity type. Kept here rather than in
+# either backend so the two render the same shape and share the pivot below.
+DESCENDANT_TYPE_COLUMN = "descendant_type"
+DESCENDANT_COUNT_COLUMN = "descendant_count"
+
+
+def pivot_descendant_counts(rows: list[dict[str, Any]], count_types: list[str]) -> list[dict]:
+    """Fold `(root, descendant_type, n)` rows into one row per root with a `counts` dict.
+
+    Counting per type in SQL and pivoting here keeps the query free of entity-type literals:
+    a `CASE WHEN type = 'Project'` pivot needs one literal per counted type baked into the
+    SELECT list, which is exactly the coupling the ontology registry exists to remove. Every
+    name in `count_types` appears in `counts`, zero-filled, so a caller never has to
+    distinguish "no descendants of that type" from "column absent".
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row = dict(row)
+        descendant_type = row.pop(DESCENDANT_TYPE_COLUMN, None)
+        count = row.pop(DESCENDANT_COUNT_COLUMN, 0)
+        entry = grouped.setdefault(
+            row["entity_id"], {**row, "counts": dict.fromkeys(count_types, 0)}
+        )
+        if descendant_type in entry["counts"]:
+            entry["counts"][descendant_type] = int(count)
+    return list(grouped.values())
 
 
 @runtime_checkable
@@ -54,6 +81,18 @@ class GraphBackend(Protocol):
         """Find a single entity by name, exact or partial (case-insensitive) match."""
         ...
 
-    def get_goals_status_summary(self) -> list[dict]:
-        """Return per-goal status plus transitive initiative/project/task counts."""
+    def get_descendant_counts(
+        self, root_type: str, count_types: list[str] | None = None
+    ) -> list[dict]:
+        """Per-root transitive descendant counts, broken down by descendant entity type.
+
+        Args:
+            root_type: The entity type to report on, one row per entity of that type.
+            count_types: Descendant entity types to count. Defaults to every type the
+                ontology declares.
+
+        Returns:
+            One dict per root: the root's own projected columns plus `counts`, a
+            `{entity_type: int}` mapping with every name in `count_types` present.
+        """
         ...

@@ -25,6 +25,11 @@ from typing import Any
 
 import duckdb
 
+from graph_rag.backends.base import (
+    DESCENDANT_COUNT_COLUMN,
+    DESCENDANT_TYPE_COLUMN,
+    pivot_descendant_counts,
+)
 from graph_rag.dialects.duckdb import DuckDbDialect
 from graph_rag.models import BlockerHit, EnrichmentResult, Entity
 from graph_rag.ontology.models import Ontology
@@ -144,10 +149,7 @@ class DuckDBGraphBackend:
         tc = self._tc
         rows = self._execute(
             f"""
-            SELECT {tc.node_id_column} AS entity_id, {tc.node_name_column} AS name,
-                   {tc.node_type_column} AS type, {tc.node_status_column} AS status,
-                   owner_id, description, priority, risk_level, properties,
-                   created_at, updated_at
+            SELECT {tc.node_projection()}
             FROM {tc.node_table}
             WHERE {tc.node_id_column} = {self.dialect.param("entity_id")}
             """,
@@ -284,10 +286,7 @@ class DuckDBGraphBackend:
                 UNION
                 SELECT entity_id FROM children
             )
-            SELECT
-                risk.{tc.node_id_column} AS entity_id, risk.{tc.node_name_column} AS name,
-                risk.{tc.node_type_column} AS type, risk.{tc.node_status_column} AS status,
-                risk.description, risk.priority, risk.risk_level, risk.properties
+            SELECT {tc.node_projection("risk")}
             FROM {tc.edge_table} r
             JOIN {tc.node_table} risk ON r.{tc.edge_source_column} = risk.{tc.node_id_column}
             JOIN entity_and_children target ON r.{tc.edge_target_column} = target.entity_id
@@ -316,8 +315,7 @@ class DuckDBGraphBackend:
 
         sql = f"""
             SELECT DISTINCT
-                p.{tc.node_id_column} AS entity_id, p.{tc.node_name_column} AS name,
-                p.{tc.node_type_column} AS type, p.description, p.properties,
+                {tc.node_projection("p")},
                 r.{tc.edge_type_column} AS relationship_type
             FROM {tc.edge_table} r
             JOIN {tc.node_table} p ON r.{tc.edge_source_column} = p.{tc.node_id_column}
@@ -403,11 +401,7 @@ class DuckDBGraphBackend:
         """Find a single entity by name, exact or partial (case-insensitive) match."""
         tc = self._tc
         name_param = self.dialect.param("name")
-        select = (
-            f"SELECT {tc.node_id_column} AS entity_id, {tc.node_name_column} AS name, "
-            f"{tc.node_type_column} AS type, {tc.node_status_column} AS status, "
-            f"description, priority, risk_level, properties FROM {tc.node_table}"
-        )
+        select = f"SELECT {tc.node_projection()} FROM {tc.node_table}"
         if exact:
             where = f"WHERE LOWER({tc.node_name_column}) = LOWER({name_param})"
         else:
@@ -421,25 +415,34 @@ class DuckDBGraphBackend:
         rows = self._execute(f"{select} {where} LIMIT 1", params)
         return Entity(**rows[0]) if rows else None
 
-    def get_goals_status_summary(self) -> list[dict]:
-        """Per-goal status plus RECURSIVE (transitive) initiative/project/task counts.
+    def get_descendant_counts(
+        self, root_type: str, count_types: list[str] | None = None
+    ) -> list[dict]:
+        """Per-root columns plus RECURSIVE (transitive) descendant counts by entity type.
 
-        Deliberate improvement over the ported source: the source counts only DIRECT
-        `belongs_to` children of each Goal. On this repo's strict tree (task -> project ->
-        initiative -> goal), that would report 0 projects and 0 tasks for every goal, since
-        those are two and three hops away respectively. This version walks `belongs_to`
-        recursively (same bounded shape as the other hierarchy patterns) so counts include
-        transitive descendants.
+        Two deliberate departures from the ported source, whose equivalent counted only DIRECT
+        children of a hardcoded root type into hardcoded per-type columns:
+
+        * The walk is recursive. On this repo's strict tree (task -> project -> initiative ->
+          goal), counting direct children alone reports zero for everything two or more hops
+          down.
+        * The types are arguments, not literals. This is a method on the `GraphBackend`
+          Protocol — the advertised generic API — so baking one domain's type names into it
+          contradicted the registry's whole premise. `root_type` travels as a query parameter,
+          and the per-type breakdown is pivoted in Python by `pivot_descendant_counts` rather
+          than as one `CASE WHEN type = '...'` literal per counted type.
         """
         tc = self._tc
+        count_types = count_types if count_types is not None else self.ontology.entity_type_names()
         hierarchy_rel_types = resolve_semantic(self.ontology, _HIERARCHY_SEMANTIC)
         depth = effective_max_depth(self.ontology, hierarchy_rel_types, _DEFAULT_HIERARCHY_DEPTH)
         membership = self.dialect.array_membership(f"r.{tc.edge_type_column}", "rel_types")
+        root_param = self.dialect.param("root_type")
 
         sql = f"""
             WITH RECURSIVE descendants AS (
                 SELECT
-                    g.{tc.node_id_column} AS goal_id,
+                    g.{tc.node_id_column} AS root_id,
                     e.{tc.node_id_column} AS entity_id, e.{tc.node_type_column} AS type,
                     1 AS depth
                 FROM {tc.node_table} g
@@ -449,23 +452,25 @@ class DuckDBGraphBackend:
 
                 UNION ALL
 
-                SELECT d.goal_id, e.{tc.node_id_column}, e.{tc.node_type_column}, d.depth + 1
+                SELECT d.root_id, e.{tc.node_id_column}, e.{tc.node_type_column}, d.depth + 1
                 FROM descendants d
                 JOIN {tc.edge_table} r ON r.{tc.edge_target_column} = d.entity_id
                 JOIN {tc.node_table} e ON r.{tc.edge_source_column} = e.{tc.node_id_column}
                 WHERE {membership}
                     AND d.depth < {int(depth)}
+            ),
+            counts AS (
+                SELECT root_id, type AS {DESCENDANT_TYPE_COLUMN},
+                       COUNT(DISTINCT entity_id) AS {DESCENDANT_COUNT_COLUMN}
+                FROM descendants
+                GROUP BY root_id, type
             )
-            SELECT
-                g.{tc.node_id_column} AS entity_id, g.{tc.node_name_column} AS name,
-                g.{tc.node_status_column} AS status, g.description,
-                COUNT(DISTINCT CASE WHEN d.type = 'Initiative' THEN d.entity_id END) AS initiative_count,
-                COUNT(DISTINCT CASE WHEN d.type = 'Project' THEN d.entity_id END) AS project_count,
-                COUNT(DISTINCT CASE WHEN d.type = 'Task' THEN d.entity_id END) AS task_count
+            SELECT {tc.node_projection("g")},
+                   c.{DESCENDANT_TYPE_COLUMN}, c.{DESCENDANT_COUNT_COLUMN}
             FROM {tc.node_table} g
-            LEFT JOIN descendants d ON g.{tc.node_id_column} = d.goal_id
-            WHERE g.{tc.node_type_column} = 'Goal'
-            GROUP BY g.{tc.node_id_column}, g.{tc.node_name_column}, g.{tc.node_status_column}, g.description
+            LEFT JOIN counts c ON g.{tc.node_id_column} = c.root_id
+            WHERE g.{tc.node_type_column} = {root_param}
             ORDER BY name
         """
-        return self._execute(sql, {"rel_types": hierarchy_rel_types})
+        rows = self._execute(sql, {"rel_types": hierarchy_rel_types, "root_type": root_type})
+        return pivot_descendant_counts(rows, count_types)

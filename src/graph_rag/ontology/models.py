@@ -51,7 +51,14 @@ class Semantic(BaseModel):
 
 
 class TableConfig(BaseModel):
-    """Table and column names backing the graph, so none of these are literals in a query."""
+    """Table and column names backing the graph, so none of these are literals in a query.
+
+    Exactly four node columns are REQUIRED — id, name, type, status. That minimum is what
+    makes "expose two views over your own tables" true rather than aspirational: a four-column
+    node view is enough to run every `GraphBackend` method. `node_extra_columns` names any
+    further physical columns a full-row lookup should also project; they map onto `Entity`'s
+    optional fields, and the default of `[]` means a minimal schema needs no declaration at all.
+    """
 
     node_table: str
     edge_table: str
@@ -62,6 +69,52 @@ class TableConfig(BaseModel):
     edge_source_column: str
     edge_target_column: str
     edge_type_column: str
+    node_extra_columns: list[str] = []
+
+    @model_validator(mode="after")
+    def _validate_extra_columns(self) -> TableConfig:
+        required = {
+            self.node_id_column,
+            self.node_name_column,
+            self.node_type_column,
+            self.node_status_column,
+        }
+        canonical = {"entity_id", "name", "type", "status"}
+        seen: set[str] = set()
+        for column in self.node_extra_columns:
+            if column in required:
+                raise ValueError(
+                    f"node_extra_columns entry '{column}' is already one of the four required "
+                    f"node columns; it would be projected twice"
+                )
+            if column in canonical:
+                raise ValueError(
+                    f"node_extra_columns entry '{column}' collides with the canonical output "
+                    f"name '{column}' that a required column is aliased to"
+                )
+            if column in seen:
+                raise ValueError(f"node_extra_columns entry '{column}' is duplicated")
+            seen.add(column)
+        return self
+
+    def node_projection(self, alias: str | None = None) -> str:
+        """Render the canonical node SELECT list, optionally prefixed by a table `alias`.
+
+        The four required columns are aliased to the canonical `Entity` field names
+        (`entity_id`, `name`, `type`, `status`); every declared extra column is projected
+        under its own name. Full-row queries in both backends render their projection through
+        this one helper — the same list repeated inline per query is what previously made a
+        four-column node table fail on seven of eight `GraphBackend` methods.
+        """
+        prefix = f"{alias}." if alias else ""
+        parts = [
+            f"{prefix}{self.node_id_column} AS entity_id",
+            f"{prefix}{self.node_name_column} AS name",
+            f"{prefix}{self.node_type_column} AS type",
+            f"{prefix}{self.node_status_column} AS status",
+        ]
+        parts.extend(f"{prefix}{column}" for column in self.node_extra_columns)
+        return ", ".join(parts)
 
 
 class Ontology(BaseModel):

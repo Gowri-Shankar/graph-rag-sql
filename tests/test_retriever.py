@@ -46,8 +46,8 @@ class StubBackend:
         self._record("find_by_name", name, entity_type=entity_type, exact=exact)
         return self._name_lookup
 
-    def get_goals_status_summary(self):
-        self._record("get_goals_status_summary")
+    def get_descendant_counts(self, root_type, count_types=None):
+        self._record("get_descendant_counts", root_type, count_types)
         return []
 
 
@@ -126,10 +126,10 @@ def test_find_by_name_delegates():
     ]
 
 
-def test_goals_summary_delegates():
+def test_descendant_counts_delegates():
     backend = StubBackend()
-    GraphRetriever(backend).goals_summary()
-    assert backend.calls == [("get_goals_status_summary", (), {})]
+    GraphRetriever(backend).descendant_counts("Goal")
+    assert backend.calls == [("get_descendant_counts", ("Goal", None), {})]
 
 
 # -- Runs identically over the real DuckDB backend ------------------------------------------

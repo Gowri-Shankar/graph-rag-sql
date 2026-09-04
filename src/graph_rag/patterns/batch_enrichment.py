@@ -11,6 +11,14 @@ caller never has to special-case "no blockers" vs "no blockers column".
 Complexity: same recursive-CTE cost per hop as Patterns 1 and 2, paid once for the whole
 batch rather than once per entity — the entire point of the pattern.
 
+Canonical names before aggregation: `struct_agg` emits bare, unqualified column names, so
+whatever it aggregates over must already expose the canonical `entity_id`/`name`/`type`/
+`status` names. The `parents` and `blockers` groups aggregate over recursive CTEs that alias
+in their seed branch, but `risks` and `owners` aggregate over the node table directly — so
+each wraps its join in an inner projection that aliases first. Without it those two groups
+only worked on a schema whose PHYSICAL column names happened to equal the canonical ones,
+which is a domain assumption hiding inside a supposedly domain-free pattern.
+
 No domain literals: every relationship-type list (`hierarchy_rel_types`, `blocker_rel_types`,
 `risk_rel_types`, `ownership_rel_types`) is pre-resolved by the caller; table/column names
 come from `ontology.table_config`. Deviation from the ported source: rather than filtering by
@@ -173,20 +181,30 @@ def render(
             GROUP BY blocked_id
         ),
         risks AS (
-            SELECT r.{dst_col} AS threatened_id, {risks_agg}
-            FROM {edges} r
-            JOIN {entities} e ON r.{src_col} = e.{id_col}
-            WHERE {entity_ids_membership_dst}
-                AND {risk_membership}
-            GROUP BY r.{dst_col}
+            SELECT threatened_id, {risks_agg}
+            FROM (
+                SELECT r.{dst_col} AS threatened_id,
+                    e.{id_col} AS entity_id, e.{name_col} AS name,
+                    e.{type_col} AS type, e.{status_col} AS status
+                FROM {edges} r
+                JOIN {entities} e ON r.{src_col} = e.{id_col}
+                WHERE {entity_ids_membership_dst}
+                    AND {risk_membership}
+            ) AS risk_rows
+            GROUP BY threatened_id
         ),
         owners AS (
-            SELECT r.{dst_col} AS owned_id, {owners_agg}
-            FROM {edges} r
-            JOIN {entities} e ON r.{src_col} = e.{id_col}
-            WHERE {entity_ids_membership_dst}
-                AND {ownership_membership}
-            GROUP BY r.{dst_col}
+            SELECT owned_id, {owners_agg}
+            FROM (
+                SELECT r.{dst_col} AS owned_id,
+                    e.{id_col} AS entity_id, e.{name_col} AS name,
+                    e.{type_col} AS type, e.{status_col} AS status
+                FROM {edges} r
+                JOIN {entities} e ON r.{src_col} = e.{id_col}
+                WHERE {entity_ids_membership_dst}
+                    AND {ownership_membership}
+            ) AS owner_rows
+            GROUP BY owned_id
         )
         SELECT
             te.entity_id,

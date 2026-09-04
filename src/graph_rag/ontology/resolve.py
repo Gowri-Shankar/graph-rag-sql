@@ -33,18 +33,25 @@ def resolve_semantic(ontology: Ontology, name: str) -> list[str]:
 def effective_max_depth(ontology: Ontology, rel_types: list[str], requested: int) -> int:
     """Clamp a requested traversal depth to the tightest cap among the given relationship types.
 
+    Two declarations constrain the result. A `traversal: terminal` type is not recursive at
+    all — it is an enrichment edge (who owns this, what threatens it), so it clamps to a single
+    hop no matter what `max_depth` says or omits. A `max_depth` clamps a transitive type's
+    blast radius. Both are the registry deciding, rather than application code.
+
     Args:
         ontology: The loaded ontology.
         rel_types: Relationship type names involved in the traversal.
         requested: The depth the caller asked for.
 
     Returns:
-        The minimum of `requested` and every involved type's declared `max_depth` (types with
-        no cap don't constrain the result).
+        The minimum of `requested`, 1 for any involved terminal type, and every involved
+        type's declared `max_depth` (transitive types with no cap don't constrain the result).
     """
     effective = requested
     for rel_type_name in rel_types:
         rel_def = ontology.get_relationship_type(rel_type_name)
+        if rel_def.traversal == "terminal":
+            effective = min(effective, 1)
         if rel_def.max_depth is not None:
             effective = min(effective, rel_def.max_depth)
     return effective

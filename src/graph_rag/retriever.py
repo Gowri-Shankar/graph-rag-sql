@@ -86,6 +86,11 @@ class GraphRetriever:
         """Find a single entity by name, exact or partial (case-insensitive) match."""
         return self.backend.find_by_name(name, entity_type, exact=exact)
 
-    def goals_summary(self) -> list[dict]:
-        """Per-goal status plus transitive initiative/project/task counts."""
-        return self.backend.get_goals_status_summary()
+    def descendant_counts(
+        self, root_type: str, count_types: list[str] | None = None
+    ) -> list[dict]:
+        """Per-root columns plus transitive descendant counts, broken down by entity type.
+
+        `count_types` defaults to every entity type the ontology declares.
+        """
+        return self.backend.get_descendant_counts(root_type, count_types)

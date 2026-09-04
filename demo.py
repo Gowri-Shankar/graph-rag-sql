@@ -283,11 +283,14 @@ def main() -> None:
         )
 
     _hr("Goal status summary (recursive counts)")
-    for goal in retriever.goals_summary():
+    # The type names are this demo's business, not the backend's: `get_descendant_counts` takes
+    # them as arguments so the same method reports on any domain's hierarchy.
+    for goal in retriever.descendant_counts("Goal", ["Initiative", "Project", "Task"]):
+        counts = goal["counts"]
         print(
             f"  {goal['name']} [{goal['status']}]: "
-            f"{goal['initiative_count']} initiatives, {goal['project_count']} projects, "
-            f"{goal['task_count']} tasks"
+            f"{counts['Initiative']} initiatives, {counts['Project']} projects, "
+            f"{counts['Task']} tasks"
         )
 
     if args.live_swap:

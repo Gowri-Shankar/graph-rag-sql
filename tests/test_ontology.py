@@ -19,6 +19,7 @@ from graph_rag.ontology import (
 )
 
 ORG_GRAPH_PATH = "ontology/org_graph.yaml"
+TINY_DOMAIN_PATH = "tests/fixtures/tiny_domain.yaml"
 
 
 @pytest.fixture
@@ -50,6 +51,57 @@ def test_effective_max_depth_clamps_to_registry_cap():
     ontology = Ontology.from_source(FileOntologySource(ORG_GRAPH_PATH))
     depth = effective_max_depth(ontology, ["blocks", "depends_on"], requested=10)
     assert depth == 5
+
+
+def test_effective_max_depth_clamps_terminal_types_to_one_hop(raw_org_graph):
+    """A `traversal: terminal` type is enrichment-only and never recurses.
+
+    The registry field used to be inert — declared, documented, and read by no code, so the
+    README's claim that it governs recursion was untrue. Uncapping `max_depth` here isolates
+    `traversal` as the thing doing the clamping.
+    """
+    raw = copy.deepcopy(raw_org_graph)
+    for rel in raw["relationship_types"]:
+        if rel["name"] == "threatens":
+            rel["max_depth"] = None
+    ontology = Ontology.model_validate(raw)
+
+    assert ontology.get_relationship_type("threatens").traversal == "terminal"
+    assert effective_max_depth(ontology, ["threatens"], requested=5) == 1
+    # A transitive type with no cap is still unconstrained.
+    assert effective_max_depth(ontology, ["belongs_to"], requested=4) == 4
+
+
+def test_node_extra_columns_defaults_to_empty():
+    """The default is what makes a minimal four-column node view work with no declaration."""
+    ontology = Ontology.from_source(FileOntologySource(TINY_DOMAIN_PATH))
+    assert ontology.table_config.node_extra_columns == []
+
+
+def test_node_projection_renders_canonical_aliases_plus_extras():
+    tc = Ontology.from_source(FileOntologySource(ORG_GRAPH_PATH)).table_config
+    projection = tc.node_projection("e")
+    assert projection.startswith(
+        "e.entity_id AS entity_id, e.name AS name, e.type AS type, e.status AS status"
+    )
+    assert "e.description" in projection
+    assert tc.node_projection().startswith("entity_id AS entity_id")
+
+
+def test_node_extra_columns_may_not_repeat_a_required_column(raw_org_graph):
+    raw = copy.deepcopy(raw_org_graph)
+    raw["table_config"]["node_extra_columns"] = ["name"]
+    with pytest.raises(ValueError, match="projected twice"):
+        Ontology.model_validate(raw)
+
+
+def test_node_extra_columns_may_not_collide_with_a_canonical_alias(raw_org_graph):
+    """Physical `subject` aliased to `name` collides with an extra column literally named `name`."""
+    raw = copy.deepcopy(raw_org_graph)
+    raw["table_config"]["node_name_column"] = "subject"
+    raw["table_config"]["node_extra_columns"] = ["name"]
+    with pytest.raises(ValueError, match="collides with the canonical output name"):
+        Ontology.model_validate(raw)
 
 
 def test_every_type_has_a_description(raw_org_graph):

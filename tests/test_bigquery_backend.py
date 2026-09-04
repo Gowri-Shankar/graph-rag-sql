@@ -274,6 +274,71 @@ def test_find_risks_for_entity_recursive_step_walks_downward(fake_bigquery, org_
     assert "ON c.entity_id = r.source_entity_id" not in sql
 
 
+def _capture_sql(backend, call):
+    captured = {}
+
+    def fake_query(sql, job_config=None):
+        captured["sql"] = sql
+        captured["job_config"] = job_config
+        return FakeQueryJob([])
+
+    backend.client.query = fake_query
+    call()
+    return " ".join(captured["sql"].split()), captured.get("job_config")
+
+
+def test_enrich_entities_batch_aliases_before_aggregating(fake_bigquery, org_ontology):
+    """`struct_agg` emits bare column names, so its input must already be canonically named.
+
+    Structural guard for the schema-portability fix: the `risks` and `owners` groups aggregate
+    over the node table directly, so each must wrap its join in an inner projection that
+    aliases the physical columns to `entity_id`/`name`/`type`/`status` first. Without it those
+    two groups only worked where the physical names happened to equal the canonical ones —
+    which org_graph's do, hiding the bug from every executable test.
+    """
+    backend = _make_backend(fake_bigquery, org_ontology)
+    sql, _ = _capture_sql(backend, lambda: backend.enrich_entities_batch(["proj-atlas"]))
+
+    for keyed_by, agg in (("threatened_id", "risks"), ("owned_id", "owners")):
+        assert f"{keyed_by}, ARRAY_AGG(STRUCT(entity_id, name, type, status)) AS {agg} FROM (" in sql
+        assert f"GROUP BY {keyed_by}" in sql
+    # The aggregates read the derived table's aliases, never the node table's own columns.
+    assert "e.entity_id AS entity_id, e.name AS name, e.type AS type, e.status AS status" in sql
+
+
+def test_get_descendant_counts_parameterizes_the_root_type(fake_bigquery, org_ontology):
+    """No entity-type literal survives in a Protocol method's SQL.
+
+    This method used to hardcode a `WHERE type = 'Goal'` filter and one
+    `CASE WHEN type = '<literal>'` per counted type, making an advertised generic API
+    unusable on any other domain. The root type now travels as a query parameter and the
+    per-type breakdown is pivoted in Python.
+    """
+    backend = _make_backend(fake_bigquery, org_ontology)
+    sql, job_config = _capture_sql(backend, lambda: backend.get_descendant_counts("Goal"))
+
+    assert "WHERE g.type = @root_type" in sql
+    for literal in ("'Goal'", "'Initiative'", "'Project'", "'Task'"):
+        assert literal not in sql
+    root_params = [p for p in job_config.query_parameters if p.name == "root_type"]
+    assert [p.value for p in root_params] == ["Goal"]
+
+
+def test_full_row_projections_render_through_node_projection(fake_bigquery, org_ontology):
+    """Every full-row query projects the same helper-rendered column list.
+
+    The list used to be repeated inline in four places per backend, each hardcoding physical
+    columns (`owner_id`, `description`, ...) that `TableConfig` never declared.
+    """
+    backend = _make_backend(fake_bigquery, org_ontology)
+    expected = org_ontology.table_config.node_projection("risk")
+    sql, _ = _capture_sql(backend, lambda: backend.find_risks_for_entity("proj-atlas"))
+    assert " ".join(expected.split()) in sql
+
+    sql, _ = _capture_sql(backend, lambda: backend.find_by_name("Atlas"))
+    assert " ".join(org_ontology.table_config.node_projection().split()) in sql
+
+
 def test_get_entity_owners_qualifies_table_name(fake_bigquery, org_ontology):
     backend = _make_backend(fake_bigquery, org_ontology)
     captured = {}

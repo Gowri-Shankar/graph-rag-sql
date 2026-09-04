@@ -54,6 +54,9 @@ class SqlDialect(Protocol):
         Args:
             alias: Output column alias for the aggregated array-of-structs.
             fields: Column names to pack into each struct (also used as struct field names).
+                Rendered bare and unqualified, so the caller is responsible for aggregating
+                over a scope that already exposes exactly these names — alias a physical
+                column list to them in an inner projection first.
             limit: Optional per-group cap on the number of aggregated rows.
         """
         ...

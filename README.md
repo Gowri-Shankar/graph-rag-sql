@@ -32,19 +32,32 @@ Each pattern lives in [`src/graph_rag/patterns/`](src/graph_rag/patterns/) as a 
 
 Walk `belongs_to` edges up (ancestors) or down (subtree), depth-capped so cycles and fan-out can't hurt you.
 
+Rendered by `patterns/hierarchy.py` for `direction="down"` — table names, column names and the
+relationship-type list all come from the registry, which is why no type name appears as a
+literal anywhere in it (dataset elided for width):
+
 ```sql
-WITH RECURSIVE children AS (
- SELECT e.entity_id, e.name, e.type, e.status, 0 AS depth
- FROM canonical_entities e WHERE e.entity_id = @entity_id
- UNION ALL
- SELECT e.entity_id, e.name, e.type, e.status, c.depth + 1
- FROM children c
- JOIN entity_relationships r
- ON r.target_entity_id = c.entity_id AND r.relationship_type = 'belongs_to'
- JOIN canonical_entities e ON e.entity_id = r.source_entity_id
- WHERE c.depth < 3 -- the bound is what makes this viable
+WITH RECURSIVE hierarchy AS (
+  SELECT e.entity_id AS entity_id, e.name AS name,
+         e.type AS type, e.status AS status,
+         1 AS depth
+  FROM entity_relationships r
+  JOIN canonical_entities e ON r.source_entity_id = e.entity_id
+  WHERE r.target_entity_id = @entity_id
+    AND r.relationship_type IN UNNEST(@rel_types)
+
+  UNION ALL
+
+  SELECT e.entity_id AS entity_id, e.name AS name,
+         e.type AS type, e.status AS status,
+         h.depth + 1
+  FROM hierarchy h
+  JOIN entity_relationships r ON h.entity_id = r.target_entity_id
+  JOIN canonical_entities e ON r.source_entity_id = e.entity_id
+  WHERE r.relationship_type IN UNNEST(@rel_types)
+    AND h.depth < 3          -- the bound is what makes this viable
 )
-SELECT * FROM children WHERE depth > 0;
+SELECT * FROM hierarchy ORDER BY depth ASC;
 ```
 
 ```python
@@ -75,8 +88,10 @@ WITH RECURSIVE blocker_chain AS (
  AND r.relationship_type IN UNNEST(@rel_types)
 )
 SELECT * FROM blocker_chain
-QUALIFY ROW_NUMBER() OVER (PARTITION BY entity_id, distance ORDER BY name) = 1
-ORDER BY distance LIMIT 50;
+QUALIFY ROW_NUMBER() OVER (PARTITION BY entity_id, distance ORDER BY name) <= 1
+ORDER BY distance ASC,
+  CASE status WHEN 'blocked' THEN 1 WHEN 'at_risk' THEN 2 WHEN 'delayed' THEN 3 ELSE 4 END
+LIMIT 50;
 ```
 
 ```python
@@ -109,7 +124,7 @@ relationship_types:
     target_types: [Task, Project]
     inverse: blocks
     traversal: transitive          # may recurse; `terminal` types are enrichment-only
-    canonical_direction: target_to_source
+    canonical_direction: source_to_target
     max_depth: 5                   # per-type blast-radius cap
 
 semantics:
@@ -118,35 +133,55 @@ semantics:
 ```
 
 Pattern modules never see a type name. The backend resolves a semantic to a concrete list and
-passes it as an array query parameter, so `patterns/` contains no domain literals and no table
-names — those come from the registry's `table_config` too.
+passes it as an array query parameter, so `patterns/` carries no entity- or relationship-type
+literals and no table names — those come from the registry's `table_config` too. The one
+deliberate exception is documented where it lives: `patterns/blocker_chains.py` orders results
+by a `CASE status WHEN 'blocked' ... 'at_risk' ... 'delayed'` priority. That is display
+ordering over a status vocabulary the registry does not model, and it degrades to the `ELSE`
+branch — not an error — on a domain that uses different status values.
 
 **Adapting to a different domain is two views and one YAML file — no Python changes.** Expose
-your own tables in the shape the registry declares:
+your own tables in the shape the registry declares. Four node columns and three edge columns
+are the whole requirement; anything richer is opt-in through `table_config.node_extra_columns`:
 
 ```sql
 CREATE VIEW graph_nodes AS
-  SELECT id AS node_id, subject AS name, 'Incident' AS node_type, state AS status FROM incidents
-  UNION ALL SELECT id, name, 'Service', status FROM services;
+  SELECT id AS node_id, subject AS title, 'Incident' AS node_type, state FROM incidents
+  UNION ALL
+  SELECT id, name, 'Service', status FROM services;
 
 CREATE VIEW graph_edges AS
-  SELECT cause_id AS src_id, effect_id AS dst_id, 'caused_by' AS edge_type FROM incident_links;
+  SELECT effect_id AS src_id, cause_id AS dst_id, 'caused_by' AS edge_type FROM incident_links
+  UNION ALL
+  SELECT service_id, host_id, 'runs_on' FROM service_hosts;
 ```
 
 ```python
-ontology  = FileOntologySource("my_domain.yaml").load()
-backend   = DuckDBGraphBackend.from_csv("nodes.csv", "edges.csv", ontology)
+from graph_rag.backends.duckdb_backend import DuckDBGraphBackend
+from graph_rag.models import GraphFilters
+from graph_rag.ontology import FileOntologySource, Ontology, resolve_semantic
+from graph_rag.retriever import GraphRetriever
+
+ontology  = Ontology.from_source(FileOntologySource("my_domain.yaml"))
+backend   = DuckDBGraphBackend("my_warehouse.duckdb", ontology)   # where the views above live
 retriever = GraphRetriever(backend)
+
 retriever.traverse(GraphFilters(
-    entity_id="svc-checkout",
+    entity_id="inc-1",
     rel_type=resolve_semantic(ontology, "upstream"),
     rel_max_depth=2,
 ))
+# → [{'entity_id': 'inc-2', 'name': 'Middle Incident', ..., 'depth': 1},
+#    {'entity_id': 'inc-3', 'name': 'Leaf Incident',  ..., 'depth': 2}]
 ```
 
-This is **verified, not asserted**: `tests/test_conformance.py` runs all three patterns against
-a second ontology (Service / Incident / Team) that shares no type names with the demo graph,
-with zero changes to any pattern module.
+The `my_domain.yaml` that drives this is [`tests/fixtures/tiny_domain_alt_schema.yaml`](tests/fixtures/tiny_domain_alt_schema.yaml).
+
+This is **verified, not asserted**, along two independent axes.
+`tests/test_conformance.py` runs the patterns against a second ontology (Service / Incident /
+Team) sharing no type names with the demo graph, *and* runs all eight `GraphBackend` methods
+against a third whose table and column names differ from the demo's entirely — asserting both
+return identical results. Neither needs a change to any pattern module.
 
 The registry can also live in a **table** rather than a file, behind the same `OntologySource`
 Protocol — so adding a traversable relationship type is an `INSERT`, not a redeploy.
