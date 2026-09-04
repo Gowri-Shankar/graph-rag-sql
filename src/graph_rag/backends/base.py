@@ -19,6 +19,33 @@ DESCENDANT_TYPE_COLUMN = "descendant_type"
 DESCENDANT_COUNT_COLUMN = "descendant_count"
 
 
+def order_by_declared_relationship_type(
+    rows: list[dict[str, Any]], rel_types: list[str], type_key: str = "relationship_type"
+) -> list[dict[str, Any]]:
+    """Sort `rows` by where each row's relationship type appears in `rel_types`.
+
+    `rel_types` comes straight from `resolve_semantic`, which preserves the order the ontology
+    declares a semantic's types in — so "owners before accountable parties" is read off the
+    registry rather than written as a `CASE relationship_type WHEN 'owns' ...` ladder in each
+    backend. That ladder is the same coupling `get_descendant_counts` shed: two relationship-type
+    literals inside a method that is supposed to work on any domain.
+
+    Ordering here rather than in SQL follows the precedent `patterns/hierarchy.py` sets for
+    type-priority display ordering — it is presentation, it applies to a handful of rows, and
+    doing it in SQL would need a new `SqlDialect` member (DuckDB spells array position
+    `list_position`; BigQuery needs a correlated `UNNEST ... WITH OFFSET` subquery) to buy
+    nothing a stable sort doesn't already give.
+
+    Rows whose type is absent from `rel_types` sort last. Name is the tiebreaker, so the order
+    is fully determined rather than left to whatever the engine happens to return.
+    """
+    priority = {rel_type: i for i, rel_type in enumerate(rel_types)}
+    return sorted(
+        rows,
+        key=lambda row: (priority.get(row.get(type_key), len(rel_types)), row.get("name") or ""),
+    )
+
+
 def pivot_descendant_counts(rows: list[dict[str, Any]], count_types: list[str]) -> list[dict]:
     """Fold `(root, descendant_type, n)` rows into one row per root with a `counts` dict.
 

@@ -151,4 +151,4 @@ def test_retriever_over_duckdb_backend_traverse_by_name(tiny_graph_backend):
 def test_retriever_over_duckdb_backend_owners(tiny_graph_backend):
     retriever = GraphRetriever(tiny_graph_backend)
     owners = retriever.get_owners("proj-1")
-    assert [o.name for o in owners] == ["Person One"]
+    assert [o.name for o in owners] == ["Person One", "Person Two"]

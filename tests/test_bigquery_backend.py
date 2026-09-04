@@ -339,6 +339,25 @@ def test_full_row_projections_render_through_node_projection(fake_bigquery, org_
     assert " ".join(org_ontology.table_config.node_projection().split()) in sql
 
 
+def test_get_entity_owners_carries_no_relationship_type_literals(fake_bigquery, org_ontology):
+    """Owner priority comes from the registry, so no type literal belongs in this SQL.
+
+    This backend used to end the query with
+    `ORDER BY CASE relationship_type WHEN 'owns' THEN 1 WHEN 'accountable_for' THEN 2 ELSE 3 END`
+    — two relationship-type literals inside a method the Protocol advertises as domain-neutral.
+    The ordering now derives from `resolve_semantic`'s declared order, applied identically in
+    both backends by `order_by_declared_relationship_type`.
+    """
+    backend = _make_backend(fake_bigquery, org_ontology)
+    sql, _ = _capture_sql(backend, lambda: backend.get_entity_owners("proj-atlas"))
+
+    assert "'owns'" not in sql
+    assert "'accountable_for'" not in sql
+    assert "ORDER BY" not in sql
+    # The types still reach the query — as an array parameter, the way every other filter does.
+    assert "r.relationship_type IN UNNEST(@rel_types)" in sql
+
+
 def test_get_entity_owners_qualifies_table_name(fake_bigquery, org_ontology):
     backend = _make_backend(fake_bigquery, org_ontology)
     captured = {}

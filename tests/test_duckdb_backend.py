@@ -17,9 +17,35 @@ def test_get_entity_hierarchy_unknown_entity_returns_none(tiny_graph_backend):
     assert result["children"] == []
 
 
-def test_get_entity_owners_returns_person(tiny_graph_backend):
+def test_get_entity_owners_puts_owners_before_accountable_parties(tiny_graph_backend):
+    """The documented "owners first" ordering, with both ownership types actually present.
+
+    proj-1 has person-1 via `owns` and person-2 via `accountable_for`. The query used to end in
+    `ORDER BY relationship_type`, which sorts `accountable_for` before `owns` alphabetically and
+    so returned the exact reverse of what the docstring promised.
+    """
     owners = tiny_graph_backend.get_entity_owners("proj-1")
-    assert [o.name for o in owners] == ["Person One"]
+    assert [o.name for o in owners] == ["Person One", "Person Two"]
+
+
+def test_get_entity_owners_order_follows_the_ontologys_declared_order(
+    tiny_graph_backend, org_ontology
+):
+    """The priority is read off the registry, not hardcoded and not a name sort.
+
+    Reversing the `ownership` semantic's declared relationship types must reverse the result.
+    A `CASE relationship_type WHEN 'owns' THEN 1 ...` ladder would ignore the change, and so
+    would sorting by name — "Person One" precedes "Person Two" alphabetically either way, which
+    is exactly why asserting the forward order alone is not enough.
+    """
+    reversed_ontology = org_ontology.model_copy(deep=True)
+    ownership = next(s for s in reversed_ontology.semantics if s.name == "ownership")
+    assert ownership.relationship_types == ["owns", "accountable_for"]
+    ownership.relationship_types = ["accountable_for", "owns"]
+
+    tiny_graph_backend.reload_ontology(reversed_ontology)
+    owners = tiny_graph_backend.get_entity_owners("proj-1")
+    assert [o.name for o in owners] == ["Person Two", "Person One"]
 
 
 def test_find_risks_for_entity_direct_hit(tiny_graph_backend):

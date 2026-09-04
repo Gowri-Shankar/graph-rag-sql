@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from graph_rag.backends.base import (
     DESCENDANT_COUNT_COLUMN,
     DESCENDANT_TYPE_COLUMN,
+    order_by_declared_relationship_type,
     pivot_descendant_counts,
 )
 from graph_rag.dialects.bigquery import BigQueryDialect
@@ -332,8 +333,13 @@ class BigQueryGraphBackend:
         return [Entity(**row) for row in rows]
 
     def get_entity_owners(self, entity_id: str) -> list[Entity]:
-        """Find people who own or are accountable for `entity_id`, owners before accountable
-        parties — retains the source's relationship-type-priority ordering.
+        """Find people who own or are accountable for `entity_id`, owners first.
+
+        "Owners first" is the ontology's ordering, not this method's: `resolve_semantic` returns
+        the `ownership` semantic's relationship types in declared order, and
+        `order_by_declared_relationship_type` sorts by position in that list. A domain that
+        declares its ownership types the other way round gets the other order, with no code
+        change here.
 
         Relies on the ontology's domain/range guarantee for `owns`/`accountable_for` (only a
         `Person`-typed entity can be their source) rather than an extra type literal filter.
@@ -353,13 +359,9 @@ class BigQueryGraphBackend:
             JOIN {entities} p ON r.{tc.edge_source_column} = p.{tc.node_id_column}
             WHERE r.{tc.edge_target_column} = {entity_param}
                 AND {membership}
-            ORDER BY CASE relationship_type
-                WHEN 'owns' THEN 1
-                WHEN 'accountable_for' THEN 2
-                ELSE 3
-            END
         """
         rows = self._execute(sql, {"entity_id": entity_id, "rel_types": ownership_rel_types})
+        rows = order_by_declared_relationship_type(rows, ownership_rel_types)
         return [Entity(**{k: v for k, v in row.items() if k != "relationship_type"}) for row in rows]
 
     def traverse_relationships(

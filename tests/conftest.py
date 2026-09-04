@@ -40,7 +40,8 @@ def _edge(source: str, target: str, rel_type: str) -> Relationship:
 @pytest.fixture
 def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
     """A hand-written ~12-node graph with a known hierarchy, a known 3-hop blocker chain,
-    two risks at different hierarchy levels, and one owner — small enough that every
+    two risks at different hierarchy levels, and two people related to proj-1 by DIFFERENT
+    ownership relationship types — small enough that every
     assertion in test_patterns.py and test_duckdb_backend.py is exact.
 
     Shape:
@@ -51,6 +52,7 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
                                                                               task-1)
         person-1 --owns--> proj-1
         person-2 --accountable_for--> goal-1
+        person-2 --accountable_for--> proj-1
         risk-1 --threatens--> proj-1
         risk-2 --threatens--> init-1
 
@@ -58,6 +60,9 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
     testable in both directions of error: from goal-1, risk-1 is a 2-hop descendant hit
     (a walk that only reaches direct children misses it), while from proj-1, risk-2 sits on
     an ANCESTOR and must not appear (a walk that oscillates child->parent wrongly finds it).
+
+    proj-1 has an `owns` owner and an `accountable_for` owner so `get_entity_owners`' ordering
+    is observable at all: with a single owner, any ordering rule looks correct.
     """
     entities = [
         _entity("goal-1", "Goal One", "Goal"),
@@ -84,6 +89,7 @@ def tiny_graph_backend(org_ontology: Ontology, tmp_path) -> DuckDBGraphBackend:
         _edge("task-4", "task-3", "blocks"),
         _edge("person-1", "proj-1", "owns"),
         _edge("person-2", "goal-1", "accountable_for"),
+        _edge("person-2", "proj-1", "accountable_for"),
         _edge("risk-1", "proj-1", "threatens"),
         _edge("risk-2", "init-1", "threatens"),
     ]

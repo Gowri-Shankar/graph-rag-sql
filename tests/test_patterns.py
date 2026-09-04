@@ -56,5 +56,5 @@ def test_enrichment_matches_standalone_lookups(tiny_graph_backend):
     standalone_owners = {o.name for o in tiny_graph_backend.get_entity_owners("proj-1")}
     standalone_risks = {r.name for r in tiny_graph_backend.find_risks_for_entity("proj-1")}
 
-    assert {o.name for o in result.owners} == standalone_owners == {"Person One"}
+    assert {o.name for o in result.owners} == standalone_owners == {"Person One", "Person Two"}
     assert {r.name for r in result.risks} == standalone_risks == {"Risk One"}
